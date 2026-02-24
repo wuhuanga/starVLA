@@ -369,6 +369,86 @@ class FlowmatchingActionHead(nn.Module):
             actions = actions + dt * pred_velocity
         return actions
 
+    @torch.no_grad()
+    def predict_action_guided(
+        self,
+        vl_embs_cond: torch.Tensor,
+        vl_embs_uncond: torch.Tensor,
+        state: torch.Tensor = None,
+        omega: float = 2.0,
+    ) -> torch.Tensor:
+        """
+        Velocity-level CAG (Counterfactual Action Guidance) during flow-matching denoising.
+
+        At each Euler integration step the predicted velocities from the conditioned
+        (posterior) and unconditioned (prior) branches are combined:
+            v_final = v_uncond + omega * (v_cond - v_uncond)
+
+        Args:
+            vl_embs_cond:   [B, S1, H] – hidden states from posterior branch (V+L+A).
+            vl_embs_uncond: [B, S2, H] – hidden states from prior branch (V+A+L).
+            state:          [B, 1, state_dim] or None.
+            omega:          Guidance scale (1.0 = no guidance = standard posterior).
+
+        Returns:
+            actions: [B, action_horizon, action_dim]
+        """
+        batch_size = vl_embs_cond.shape[0]
+        device = vl_embs_cond.device
+        actions = torch.randn(
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs_cond.dtype,
+            device=device,
+        )
+
+        num_steps = self.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        state_features = self.state_encoder(state) if state is not None else None
+
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+
+            timesteps_tensor = torch.full(
+                size=(batch_size,), fill_value=t_discretized, device=device
+            )
+            action_features = self.action_encoder(actions, timesteps_tensor)
+
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+            sa_embs = (
+                torch.cat((state_features, future_tokens, action_features), dim=1)
+                if state_features is not None
+                else torch.cat((future_tokens, action_features), dim=1)
+            )
+
+            # Conditioned velocity (posterior)
+            out_cond = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs_cond,
+                timestep=timesteps_tensor,
+            )
+            v_cond = self.action_decoder(out_cond)[:, -self.action_horizon:]
+
+            # Unconditioned velocity (prior)
+            out_uncond = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs_uncond,
+                timestep=timesteps_tensor,
+            )
+            v_uncond = self.action_decoder(out_uncond)[:, -self.action_horizon:]
+
+            # CAG guidance: v_final = v_uncond + omega * (v_cond - v_uncond)
+            pred_velocity = v_uncond + omega * (v_cond - v_uncond)
+
+            actions = actions + dt * pred_velocity
+        return actions
+
     @property
     def device(self):
         return next(iter(self.parameters())).device
