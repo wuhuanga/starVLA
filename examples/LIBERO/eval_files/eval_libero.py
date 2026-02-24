@@ -54,6 +54,10 @@ class Args:
 
     job_name: str = "test"
 
+    # BayesianCAG guidance parameters (ignored by non-BayesianCAG models)
+    omega: float = 0.0           # CAG guidance scale. 0.0 = use model default from config
+    guidance_mode: str = ""      # "action" or "velocity". "" = use model default from config
+
 
 def eval_libero(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
@@ -89,6 +93,8 @@ def eval_libero(args: Args) -> None:
         host=args.host,
         port=args.port,
         image_size=args.resize_size,
+        omega=args.omega,
+        guidance_mode=args.guidance_mode,
     )
 
 

@@ -31,8 +31,10 @@ class ModelClient:
         adaptive_ensemble_alpha = 0.1,
         host="0.0.0.0",
         port=10095,
+        omega: float = 0.0,
+        guidance_mode: str = "",
     ) -> None:
-        
+
         # build client to connect server policy
         self.client = WebsocketClientPolicy(host, port)
         self.policy_setup = policy_setup
@@ -41,6 +43,9 @@ class ModelClient:
         print(f"*** policy_setup: {policy_setup}, unnorm_key: {unnorm_key} ***")
         self.use_ddim = use_ddim
         self.num_ddim_steps = num_ddim_steps
+        # BayesianCAG guidance params (0.0 / "" = use model default)
+        self.omega = omega
+        self.guidance_mode = guidance_mode
         self.image_size = image_size
         self.horizon = horizon #0
         self.action_ensemble = action_ensemble
@@ -108,6 +113,11 @@ class ModelClient:
             "use_ddim": self.use_ddim,
             "num_ddim_steps": self.num_ddim_steps,
         }
+        # Pass BayesianCAG guidance params if set (non-BayesianCAG models ignore them via **kwargs)
+        if self.omega > 0:
+            vla_input["omega"] = self.omega
+        if self.guidance_mode:
+            vla_input["guidance_mode"] = self.guidance_mode
         
 
         action_chunk_size = self.action_chunk_size

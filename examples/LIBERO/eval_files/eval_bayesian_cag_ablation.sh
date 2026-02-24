@@ -9,6 +9,10 @@
 #   omega=1.0  --> equivalent to standard BayesianVLA posterior-only inference
 #   omega=1.5, 2.0, 3.0 --> CAG-guided inference with increasing strength
 #
+# How it works:
+#   Server loads the model once. Client passes omega dynamically per request,
+#   so you do NOT need to restart the server for each omega value.
+#
 # Usage:
 #   1. Start the policy server:  bash run_policy_server_bayesian_cag.sh
 #   2. Run this script:          bash eval_bayesian_cag_ablation.sh
@@ -69,9 +73,9 @@ for omega in "${omega_values[@]}"; do
         video_out_path="results/bayesian_cag_ablation/${task_suite}/omega_${omega}_${guidance_mode}"
         mkdir -p ${video_out_path}
 
-        # Note: omega is passed via the server config.
-        # To override omega per run, you need to restart the server with the desired omega
-        # or pass it through the client payload. See BayesianCAG.predict_action() for kwargs support.
+        # omega and guidance_mode are passed to the client, which forwards
+        # them in the WebSocket payload to BayesianCAG.predict_action(**kwargs).
+        # Non-BayesianCAG models safely ignore these extra kwargs.
         ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
             --args.pretrained-path ${your_ckpt} \
             --args.host "$host" \
@@ -79,6 +83,8 @@ for omega in "${omega_values[@]}"; do
             --args.task-suite-name "$task_suite" \
             --args.num-trials-per-task "$num_trials_per_task" \
             --args.video-out-path "$video_out_path" \
+            --args.omega "$omega" \
+            --args.guidance-mode "$guidance_mode" \
             2>&1 | tee "${LOG_DIR}/eval_omega${omega}_${task_suite}_${guidance_mode}.log"
 
         echo ">>> Done: omega=${omega}, task_suite=${task_suite}"
