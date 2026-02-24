@@ -56,7 +56,7 @@ class Args:
 
     # BayesianCAG guidance parameters (ignored by non-BayesianCAG models)
     omega: float = 0.0           # CAG guidance scale. 0.0 = use model default from config
-    guidance_mode: str = ""      # "action" or "velocity". "" = use model default from config
+    guidance_mode: str = ""      # "latent", "action" or "velocity". "" = use model default
 
 
 def eval_libero(args: Args) -> None:

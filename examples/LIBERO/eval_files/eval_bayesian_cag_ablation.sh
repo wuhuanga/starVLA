@@ -1,17 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# BayesianCAG Ablation Evaluation
+# BayesianCAG Ablation Evaluation  (v2)
 # =============================================================================
-# Evaluates the BayesianCAG model across different guidance scales (omega)
-# and guidance modes to find the optimal configuration.
+# Sweeps omega values across guidance modes:
+#   latent   – token-wise dynamic omega on latent features (recommended)
+#   action   – uniform omega on final actions (original CAG)
+#   velocity – uniform omega on each denoising step
 #
-# Baselines included:
-#   omega=1.0  --> equivalent to standard BayesianVLA posterior-only inference
-#   omega=1.5, 2.0, 3.0 --> CAG-guided inference with increasing strength
+# omega=1.0 in any mode = standard BayesianVLA posterior-only baseline.
 #
-# How it works:
-#   Server loads the model once. Client passes omega dynamically per request,
-#   so you do NOT need to restart the server for each omega value.
+# Server loads the model once. Client passes omega + mode dynamically,
+# so you do NOT need to restart the server between runs.
 #
 # Usage:
 #   1. Start the policy server:  bash run_policy_server_bayesian_cag.sh
@@ -41,15 +40,13 @@ base_port=5694
 num_trials_per_task=50
 
 # === Task suites to evaluate ===
-# For LIBERO-CF style evaluation, use libero_spatial and libero_object
-# which test visual shortcut / counterfactual grounding
 task_suites=("libero_spatial" "libero_object" "libero_goal")
 
 # === Guidance scale ablation values ===
 omega_values=("1.0" "1.5" "2.0" "3.0")
 
-# === Guidance mode ===
-guidance_mode="action"  # or "velocity"
+# === Guidance modes to sweep ===
+guidance_modes=("latent" "action")
 # === End of configuration ===
 ###########################################################################################
 
@@ -57,37 +54,36 @@ LOG_DIR="logs/bayesian_cag_ablation_$(date +"%Y%m%d_%H%M%S")"
 mkdir -p ${LOG_DIR}
 
 echo "=============================================="
-echo "BayesianCAG Ablation Evaluation"
+echo "BayesianCAG Ablation Evaluation (v2)"
 echo "Checkpoint: ${your_ckpt}"
 echo "Omega values: ${omega_values[*]}"
 echo "Task suites: ${task_suites[*]}"
-echo "Guidance mode: ${guidance_mode}"
+echo "Guidance modes: ${guidance_modes[*]}"
 echo "Log directory: ${LOG_DIR}"
 echo "=============================================="
 
-for omega in "${omega_values[@]}"; do
-    for task_suite in "${task_suites[@]}"; do
-        echo ""
-        echo ">>> Evaluating omega=${omega}, task_suite=${task_suite}, mode=${guidance_mode}"
+for guidance_mode in "${guidance_modes[@]}"; do
+    for omega in "${omega_values[@]}"; do
+        for task_suite in "${task_suites[@]}"; do
+            echo ""
+            echo ">>> Evaluating mode=${guidance_mode}, omega=${omega}, task_suite=${task_suite}"
 
-        video_out_path="results/bayesian_cag_ablation/${task_suite}/omega_${omega}_${guidance_mode}"
-        mkdir -p ${video_out_path}
+            video_out_path="results/bayesian_cag_ablation/${task_suite}/omega_${omega}_${guidance_mode}"
+            mkdir -p ${video_out_path}
 
-        # omega and guidance_mode are passed to the client, which forwards
-        # them in the WebSocket payload to BayesianCAG.predict_action(**kwargs).
-        # Non-BayesianCAG models safely ignore these extra kwargs.
-        ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
-            --args.pretrained-path ${your_ckpt} \
-            --args.host "$host" \
-            --args.port $base_port \
-            --args.task-suite-name "$task_suite" \
-            --args.num-trials-per-task "$num_trials_per_task" \
-            --args.video-out-path "$video_out_path" \
-            --args.omega "$omega" \
-            --args.guidance-mode "$guidance_mode" \
-            2>&1 | tee "${LOG_DIR}/eval_omega${omega}_${task_suite}_${guidance_mode}.log"
+            ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
+                --args.pretrained-path ${your_ckpt} \
+                --args.host "$host" \
+                --args.port $base_port \
+                --args.task-suite-name "$task_suite" \
+                --args.num-trials-per-task "$num_trials_per_task" \
+                --args.video-out-path "$video_out_path" \
+                --args.omega "$omega" \
+                --args.guidance-mode "$guidance_mode" \
+                2>&1 | tee "${LOG_DIR}/eval_omega${omega}_${task_suite}_${guidance_mode}.log"
 
-        echo ">>> Done: omega=${omega}, task_suite=${task_suite}"
+            echo ">>> Done: mode=${guidance_mode}, omega=${omega}, task_suite=${task_suite}"
+        done
     done
 done
 

@@ -61,10 +61,17 @@ framework:
   kl_gate_max: 1.0
 
   # =====================================================================
+  # Latent Contrastive Alignment (InfoNCE) — training
+  # =====================================================================
+  contrastive_weight: 0.1           # weight for InfoNCE loss (delta_h vs lang_emb)
+  contrastive_tau: 0.07             # InfoNCE temperature
+
+  # =====================================================================
   # CAG inference hyper-parameters
   # =====================================================================
-  guidance_omega: 2.0               # guidance scale (1.0 = standard posterior only)
-  guidance_mode: action             # "action" or "velocity"
+  guidance_omega: 2.0               # max guidance scale (1.0 = standard posterior only)
+  guidance_mode: latent             # "latent" (token-wise dynamic) | "action" | "velocity"
+  omega_base: 1.0                   # min per-token omega (only used in latent mode)
 
 
 datasets:
