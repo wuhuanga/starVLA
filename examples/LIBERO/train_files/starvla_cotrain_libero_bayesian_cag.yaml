@@ -32,6 +32,9 @@ framework:
     num_timestep_buckets: 1000
     num_inference_timesteps: 4
     num_target_vision_tokens: 32
+    # Vision cross-attention injection in DiT (disabled by default)
+    enable_vision_cross_attn: false   # set true to inject raw visual features into DiT
+    vision_cross_attn_dim: 2048       # VLM hidden dim for vision KV projection
     diffusion_model_cfg:
       cross_attention_dim: 2048
       dropout: 0.2

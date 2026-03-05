@@ -228,6 +228,14 @@ class FlowmatchingActionHead(nn.Module):
         self.input_embedding_dim = action_model_cfg["input_embedding_dim"]
         diffusion_model_cfg = config.diffusion_model_cfg
         diffusion_model_cfg = {**action_model_cfg, **diffusion_model_cfg}
+
+        # Vision cross-attention injection (optional)
+        self.enable_vision_cross_attn = bool(getattr(config, "enable_vision_cross_attn", False))
+        if self.enable_vision_cross_attn:
+            vision_cross_attn_dim = int(getattr(config, "vision_cross_attn_dim", diffusion_model_cfg.get("cross_attention_dim", 2048)))
+            diffusion_model_cfg["enable_vision_cross_attn"] = True
+            diffusion_model_cfg["vision_cross_attn_dim"] = vision_cross_attn_dim
+
         self.model = DiT(**diffusion_model_cfg)
         self.action_dim = config.action_dim
         self.action_horizon = config.future_action_window_size + 1
@@ -267,10 +275,11 @@ class FlowmatchingActionHead(nn.Module):
         return BatchFeature(data=batch)
 
 
-    def forward(self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None, encoder_attention_mask=None):
+    def forward(self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None, encoder_attention_mask=None, vision_features: torch.Tensor = None):
         """
         vl_embs: shape (B, seq_length, feature_dim)
         actions: shape (B, future_action_window_size, D_action)
+        vision_features: shape (B, N_vis, H_vlm) — raw visual feature map (optional)
         """
         device = vl_embs.device
 
@@ -309,6 +318,7 @@ class FlowmatchingActionHead(nn.Module):
             encoder_attention_mask=encoder_attention_mask,
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
+            vision_features=vision_features,
         )
         pred = self.action_decoder(model_output)
         pred_actions = pred[:, -actions.shape[1] :]
@@ -318,7 +328,7 @@ class FlowmatchingActionHead(nn.Module):
         return loss
 
     @torch.no_grad()
-    def predict_action(self, vl_embs: torch.Tensor, state: torch.Tensor = None) -> torch.Tensor:
+    def predict_action(self, vl_embs: torch.Tensor, state: torch.Tensor = None, vision_features: torch.Tensor = None) -> torch.Tensor:
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
@@ -330,7 +340,7 @@ class FlowmatchingActionHead(nn.Module):
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
-        
+
         state_features = self.state_encoder(state) if state is not None else None
 
         # Run denoising steps.
@@ -360,6 +370,7 @@ class FlowmatchingActionHead(nn.Module):
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
+                vision_features=vision_features,
             )
             pred = self.action_decoder(model_output)
 
@@ -376,6 +387,7 @@ class FlowmatchingActionHead(nn.Module):
         vl_embs_uncond: torch.Tensor,
         state: torch.Tensor = None,
         omega: float = 2.0,
+        vision_features: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Velocity-level CAG (Counterfactual Action Guidance) during flow-matching denoising.
@@ -389,6 +401,7 @@ class FlowmatchingActionHead(nn.Module):
             vl_embs_uncond: [B, S2, H] – hidden states from prior branch (V+A+L).
             state:          [B, 1, state_dim] or None.
             omega:          Guidance scale (1.0 = no guidance = standard posterior).
+            vision_features: [B, N_vis, H_vlm] – raw visual feature map (optional).
 
         Returns:
             actions: [B, action_horizon, action_dim]
@@ -432,6 +445,7 @@ class FlowmatchingActionHead(nn.Module):
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embs_cond,
                 timestep=timesteps_tensor,
+                vision_features=vision_features,
             )
             v_cond = self.action_decoder(out_cond)[:, -self.action_horizon:]
 
@@ -440,6 +454,7 @@ class FlowmatchingActionHead(nn.Module):
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embs_uncond,
                 timestep=timesteps_tensor,
+                vision_features=vision_features,
             )
             v_uncond = self.action_decoder(out_uncond)[:, -self.action_horizon:]
 

@@ -88,6 +88,8 @@ class BasicTransformerBlock(nn.Module):
         ff_inner_dim: Optional[int] = None,
         ff_bias: bool = True,
         attention_out_bias: bool = True,
+        enable_vision_cross_attn: bool = False,
+        vision_cross_attn_dim: Optional[int] = None,
     ):
         super().__init__()
         self.dim = dim
@@ -115,7 +117,7 @@ class BasicTransformerBlock(nn.Module):
             self.pos_embed = None
 
         # Define 3 blocks. Each block has its own normalization layer.
-        # 1. Self-Attn
+        # 1. Self-Attn / Cross-Attn (to VL features)
         if norm_type == "ada_norm":
             self.norm1 = AdaLayerNorm(dim)
         else:
@@ -131,6 +133,27 @@ class BasicTransformerBlock(nn.Module):
             upcast_attention=upcast_attention,
             out_bias=attention_out_bias,
         )
+
+        # 2. (Optional) Vision cross-attention — queries raw visual feature map
+        self.enable_vision_cross_attn = enable_vision_cross_attn
+        if enable_vision_cross_attn:
+            vis_dim = vision_cross_attn_dim or cross_attention_dim or dim
+            self.norm_vis = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
+            self.attn_vis = Attention(
+                query_dim=dim,
+                heads=num_attention_heads,
+                dim_head=attention_head_dim,
+                dropout=dropout,
+                bias=attention_bias,
+                cross_attention_dim=vis_dim,
+                upcast_attention=upcast_attention,
+                out_bias=attention_out_bias,
+            )
+            # Zero-init gate so new branch starts as identity (preserves pretrained weights)
+            self.vis_gate = nn.Parameter(torch.zeros(1))
+            nn.init.zeros_(self.attn_vis.to_out[0].weight)
+            if self.attn_vis.to_out[0].bias is not None:
+                nn.init.zeros_(self.attn_vis.to_out[0].bias)
 
         # 3. Feed-forward
         self.norm3 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
@@ -154,9 +177,10 @@ class BasicTransformerBlock(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.LongTensor] = None,
+        vision_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        # 0. Self-Attention
+        # 0. Self-Attention / Cross-Attention (to VL features)
         if self.norm_type == "ada_norm":
             norm_hidden_states = self.norm1(hidden_states, temb)
         else:
@@ -165,8 +189,8 @@ class BasicTransformerBlock(nn.Module):
         if self.pos_embed is not None:
             norm_hidden_states = self.pos_embed(norm_hidden_states)
 
-        attn_output = self.attn1( 
-            norm_hidden_states, 
+        attn_output = self.attn1(
+            norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=encoder_attention_mask, #@JinhuiYE original attention_mask=attention_mask
         )
@@ -177,7 +201,13 @@ class BasicTransformerBlock(nn.Module):
         if hidden_states.ndim == 4:
             hidden_states = hidden_states.squeeze(1)
 
-        # 4. Feed-forward
+        # 1. Vision cross-attention (gated, zero-init)
+        if self.enable_vision_cross_attn and vision_features is not None:
+            vis_norm = self.norm_vis(hidden_states)
+            vis_out = self.attn_vis(vis_norm, encoder_hidden_states=vision_features)
+            hidden_states = hidden_states + torch.tanh(self.vis_gate) * vis_out
+
+        # 2. Feed-forward
         norm_hidden_states = self.norm3(hidden_states)
         ff_output = self.ff(norm_hidden_states)
 
@@ -212,6 +242,8 @@ class DiT(ModelMixin, ConfigMixin):
         positional_embeddings: Optional[str] = "sinusoidal",
         interleave_self_attention=False,
         cross_attention_dim: Optional[int] = None,
+        enable_vision_cross_attn: bool = False,
+        vision_cross_attn_dim: Optional[int] = None,
         **kwargs
     ):
         super().__init__()
@@ -232,6 +264,9 @@ class DiT(ModelMixin, ConfigMixin):
             use_self_attn = idx % 2 == 1 and interleave_self_attention
             curr_cross_attention_dim = cross_attention_dim if not use_self_attn else None
 
+            # Vision cross-attention only on cross-attention layers (even layers)
+            block_enable_vis = enable_vision_cross_attn and (not use_self_attn)
+
             all_blocks += [
                 BasicTransformerBlock(
                     self.inner_dim,
@@ -248,6 +283,8 @@ class DiT(ModelMixin, ConfigMixin):
                     num_positional_embeddings=self.config.max_num_positional_embeddings,
                     final_dropout=final_dropout,
                     cross_attention_dim=curr_cross_attention_dim,
+                    enable_vision_cross_attn=block_enable_vis,
+                    vision_cross_attn_dim=vision_cross_attn_dim,
                 )
             ]
         self.transformer_blocks = nn.ModuleList(all_blocks)
@@ -267,7 +304,8 @@ class DiT(ModelMixin, ConfigMixin):
         encoder_hidden_states: torch.Tensor,  # Shape: (B, S, D)
         timestep: Optional[torch.LongTensor] = None,
         return_all_hidden_states: bool = False,
-        encoder_attention_mask=None
+        encoder_attention_mask=None,
+        vision_features: Optional[torch.Tensor] = None,
     ):
         # Encode timesteps
         temb = self.timestep_encoder(timestep)
@@ -287,6 +325,7 @@ class DiT(ModelMixin, ConfigMixin):
                     encoder_hidden_states=None,
                     encoder_attention_mask=None,
                     temb=temb,
+                    vision_features=None,
                 )
             else:
                 hidden_states = block(
@@ -295,6 +334,7 @@ class DiT(ModelMixin, ConfigMixin):
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_attention_mask,
                     temb=temb,
+                    vision_features=vision_features,
                 )
             all_hidden_states.append(hidden_states)
 

@@ -32,7 +32,7 @@ from starVLA.training.trainer_utils import initialize_overwatch
 from deployment.model_server.tools.image_tools import to_pil_preserve
 from starVLA.training.trainer_utils.trainer_tools import resize_images
 from starVLA.model.tools import FRAMEWORK_REGISTRY
-from starVLA.model.framework.LangForce import LangForce, VISION_END_TOKEN_INDEX
+from starVLA.model.framework.LangForce import LangForce, VISION_START_TOKEN_INDEX, VISION_END_TOKEN_INDEX
 
 logger = initialize_overwatch(__name__)
 
@@ -68,10 +68,15 @@ class BayesianCAG(LangForce):
         # Token-wise dynamic omega range
         self.omega_base = float(self.config.framework.get("omega_base", 1.0))
 
+        # Vision cross-attention injection in DiT
+        self.enable_vision_cross_attn = bool(
+            self.config.framework.action_model.get("enable_vision_cross_attn", False)
+        )
+
         logger.info(
             f"[BayesianCAG] omega={self.guidance_omega}, mode={self.guidance_mode}, "
             f"contrastive_weight={self.contrastive_weight}, tau={self.contrastive_tau}, "
-            f"omega_base={self.omega_base}"
+            f"omega_base={self.omega_base}, vision_cross_attn={self.enable_vision_cross_attn}"
         )
 
     # ------------------------------------------------------------------
@@ -105,6 +110,49 @@ class BayesianCAG(LangForce):
                 continue
             lang_embs.append(hidden_states[b, lang_start:lang_end, :].mean(dim=0))
         return torch.stack(lang_embs, dim=0)  # [B, H]
+
+    # ------------------------------------------------------------------
+    # Helper: extract vision token hidden states
+    # ------------------------------------------------------------------
+    def _extract_vision_features(
+        self,
+        hidden_states: torch.Tensor,   # [B, S, H]
+        input_ids: torch.Tensor,       # [B, S]
+    ) -> torch.Tensor:
+        """
+        Extract vision token hidden states from VLM output.
+
+        Vision span: [first(vision_start)+1 : last(vision_end))
+        Pads/truncates to the max vision length in the batch.
+        Returns: [B, N_vis_max, H]
+        """
+        B, S, H = hidden_states.shape
+        vis_list = []
+        for b in range(B):
+            ids = input_ids[b]
+            # Find vision token span
+            v_start_positions = (ids == int(VISION_START_TOKEN_INDEX)).nonzero(as_tuple=True)[0]
+            v_end_positions = (ids == int(VISION_END_TOKEN_INDEX)).nonzero(as_tuple=True)[0]
+            if v_start_positions.numel() == 0 or v_end_positions.numel() == 0:
+                vis_list.append(torch.zeros(1, H, device=hidden_states.device, dtype=hidden_states.dtype))
+                continue
+            v_start = int(v_start_positions[0].item()) + 1  # after <|vision_start|>
+            v_end = int(v_end_positions[-1].item())          # before <|vision_end|>
+            if v_end <= v_start:
+                vis_list.append(torch.zeros(1, H, device=hidden_states.device, dtype=hidden_states.dtype))
+                continue
+            vis_list.append(hidden_states[b, v_start:v_end, :])
+
+        # Pad to max length in batch
+        max_len = max(v.shape[0] for v in vis_list)
+        padded = []
+        for v in vis_list:
+            if v.shape[0] < max_len:
+                pad = torch.zeros(max_len - v.shape[0], H, device=v.device, dtype=v.dtype)
+                padded.append(torch.cat([v, pad], dim=0))
+            else:
+                padded.append(v)
+        return torch.stack(padded, dim=0)  # [B, N_vis_max, H]
 
     # ------------------------------------------------------------------
     # InfoNCE contrastive loss
@@ -238,8 +286,17 @@ class BayesianCAG(LangForce):
             posteriori_cond = posteriori_action_hidden.repeat(repeated_diffusion_steps, 1, 1).float()
             state_repeated = state_tensor.repeat(repeated_diffusion_steps, 1, 1) if state_tensor is not None else None
 
-            prior_loss = self.action_model(priori_cond, actions_target_repeated, state_repeated)
-            main_loss = self.action_model(posteriori_cond, actions_target_repeated, state_repeated)
+            # Extract vision features for DiT cross-attention injection
+            vis_feats_repeated = None
+            if self.enable_vision_cross_attn:
+                vis_feats = self._extract_vision_features(
+                    posteriori_last_hidden.detach(),
+                    qwen_inputs_posteriori["input_ids"],
+                )
+                vis_feats_repeated = vis_feats.repeat(repeated_diffusion_steps, 1, 1).float()
+
+            prior_loss = self.action_model(priori_cond, actions_target_repeated, state_repeated, vision_features=vis_feats_repeated)
+            main_loss = self.action_model(posteriori_cond, actions_target_repeated, state_repeated, vision_features=vis_feats_repeated)
 
         # ===== Total loss =====
         total_loss = (
@@ -422,9 +479,19 @@ class BayesianCAG(LangForce):
             )
 
         # ============================================================
+        # Vision features for DiT cross-attention injection
+        # ============================================================
+        vis_feats = None
+        if self.enable_vision_cross_attn:
+            vis_feats = self._extract_vision_features(
+                hidden_post, qwen_inputs_post["input_ids"],
+            )
+
+        # ============================================================
         # Action prediction with CAG guidance
         # ============================================================
         with torch.autocast("cuda", dtype=torch.float32):
+            vis_feats_f = vis_feats.float() if vis_feats is not None else None
             if mode == "latent":
                 # --- Token-wise dynamic omega on latent features ---
                 # h_final = h_prior + omega_vec * (h_post - h_prior)
@@ -432,7 +499,7 @@ class BayesianCAG(LangForce):
                     action_hidden_prior + omega_vec * (action_hidden_post - action_hidden_prior)
                 )
                 pred_actions = self.action_model.predict_action(
-                    action_hidden_guided.float(), state_tensor
+                    action_hidden_guided.float(), state_tensor, vision_features=vis_feats_f
                 )
             elif mode == "velocity":
                 pred_actions = self.action_model.predict_action_guided(
@@ -440,11 +507,12 @@ class BayesianCAG(LangForce):
                     vl_embs_uncond=action_hidden_prior,
                     state=state_tensor,
                     omega=omega,
+                    vision_features=vis_feats_f,
                 )
             else:
                 # --- Action-level guidance (uniform omega) ---
-                a_cond = self.action_model.predict_action(action_hidden_post, state_tensor)
-                a_uncond = self.action_model.predict_action(action_hidden_prior, state_tensor)
+                a_cond = self.action_model.predict_action(action_hidden_post, state_tensor, vision_features=vis_feats_f)
+                a_uncond = self.action_model.predict_action(action_hidden_prior, state_tensor, vision_features=vis_feats_f)
                 pred_actions = a_uncond + omega * (a_cond - a_uncond)
 
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}
