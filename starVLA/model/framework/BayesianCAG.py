@@ -112,47 +112,99 @@ class BayesianCAG(LangForce):
         return torch.stack(lang_embs, dim=0)  # [B, H]
 
     # ------------------------------------------------------------------
-    # Helper: extract vision token hidden states
+    # Helper: extract raw ViT features from Qwen2.5-VL visual encoder
     # ------------------------------------------------------------------
     def _extract_vision_features(
         self,
-        hidden_states: torch.Tensor,   # [B, S, H]
-        input_ids: torch.Tensor,       # [B, S]
+        qwen_inputs: dict,
     ) -> torch.Tensor:
         """
-        Extract vision token hidden states from VLM output.
+        Extract spatial vision features directly from Qwen2.5-VL's ViT,
+        **bypassing** the LLM.  This preserves patch-level 2D spatial
+        information that AdaLN / LLM hidden states lose.
 
-        Vision span: [first(vision_start)+1 : last(vision_end))
-        Pads/truncates to the max vision length in the batch.
-        Returns: [B, N_vis_max, H]
+        The visual encoder (``model.visual``) takes ``pixel_values`` and
+        ``image_grid_thw`` and returns ``[total_merged_patches, D_vis]``
+        where ``D_vis`` equals the LLM hidden size (after the internal
+        patch merger projection).
+
+        We split the flat output per sample using ``image_grid_thw`` and
+        pad to the longest sequence in the batch.
+
+        Returns:
+            [B, N_vis_max, D_vis]  — pure ViT spatial features.
         """
-        B, S, H = hidden_states.shape
+        pixel_values = qwen_inputs.get("pixel_values", None)
+        image_grid_thw = qwen_inputs.get("image_grid_thw", None)
+        if pixel_values is None or image_grid_thw is None:
+            return None
+
+        # --- call the ViT directly (no LLM involved) ---
+        with torch.no_grad():
+            vit_output = self.qwen_vl_interface.model.visual(
+                pixel_values, grid_thw=image_grid_thw,
+            )  # [total_merged_patches, D_vis]
+
+        D_vis = vit_output.shape[-1]
+
+        # --- split per-image using grid_thw ---
+        # image_grid_thw: [num_images_total, 3]  (t, h_grid, w_grid)
+        # After the merger (2x2 by default), merged patches per image =
+        #   t * (h_grid // merge_size) * (w_grid // merge_size)
+        # but the visual encoder already handles the merge internally,
+        # so the output count per image = t * ceil(h/2) * ceil(w/2).
+        # We just use the total count directly from the output.
+        merge_size = getattr(
+            self.qwen_vl_interface.model.visual, "spatial_merge_size",
+            getattr(self.qwen_vl_interface.model.visual, "merge_size", 2),
+        )
+        patches_per_image = []
+        for row in image_grid_thw:
+            t, h, w = int(row[0]), int(row[1]), int(row[2])
+            n = t * (h // merge_size) * (w // merge_size)
+            patches_per_image.append(n)
+
+        # Figure out how many images belong to each batch sample.
+        # In Qwen2.5-VL preprocessing, images from all samples are
+        # concatenated.  We infer the per-sample split from the
+        # input_ids: count how many <|vision_start|> tokens per sample.
+        input_ids = qwen_inputs.get("input_ids", None)
+        if input_ids is not None:
+            imgs_per_sample = []
+            for b in range(input_ids.shape[0]):
+                n_imgs = int((input_ids[b] == int(VISION_START_TOKEN_INDEX)).sum().item())
+                imgs_per_sample.append(n_imgs)
+        else:
+            # fallback: assume equal split
+            B_guess = max(1, len(patches_per_image))
+            imgs_per_sample = [B_guess]
+
+        # Split vit_output per image, then group by sample
+        per_image_feats = torch.split(vit_output, patches_per_image, dim=0)
         vis_list = []
-        for b in range(B):
-            ids = input_ids[b]
-            # Find vision token span
-            v_start_positions = (ids == int(VISION_START_TOKEN_INDEX)).nonzero(as_tuple=True)[0]
-            v_end_positions = (ids == int(VISION_END_TOKEN_INDEX)).nonzero(as_tuple=True)[0]
-            if v_start_positions.numel() == 0 or v_end_positions.numel() == 0:
-                vis_list.append(torch.zeros(1, H, device=hidden_states.device, dtype=hidden_states.dtype))
-                continue
-            v_start = int(v_start_positions[0].item()) + 1  # after <|vision_start|>
-            v_end = int(v_end_positions[-1].item())          # before <|vision_end|>
-            if v_end <= v_start:
-                vis_list.append(torch.zeros(1, H, device=hidden_states.device, dtype=hidden_states.dtype))
-                continue
-            vis_list.append(hidden_states[b, v_start:v_end, :])
+        img_idx = 0
+        for n_imgs in imgs_per_sample:
+            if n_imgs > 0 and img_idx < len(per_image_feats):
+                sample_feats = torch.cat(
+                    [per_image_feats[img_idx + j] for j in range(n_imgs)
+                     if img_idx + j < len(per_image_feats)],
+                    dim=0,
+                )
+                vis_list.append(sample_feats)
+                img_idx += n_imgs
+            else:
+                vis_list.append(torch.zeros(1, D_vis, device=vit_output.device, dtype=vit_output.dtype))
 
         # Pad to max length in batch
         max_len = max(v.shape[0] for v in vis_list)
         padded = []
         for v in vis_list:
             if v.shape[0] < max_len:
-                pad = torch.zeros(max_len - v.shape[0], H, device=v.device, dtype=v.dtype)
+                pad = torch.zeros(max_len - v.shape[0], D_vis, device=v.device, dtype=v.dtype)
                 padded.append(torch.cat([v, pad], dim=0))
             else:
                 padded.append(v)
-        return torch.stack(padded, dim=0)  # [B, N_vis_max, H]
+        return torch.stack(padded, dim=0)  # [B, N_vis_max, D_vis]
 
     # ------------------------------------------------------------------
     # InfoNCE contrastive loss
@@ -286,14 +338,12 @@ class BayesianCAG(LangForce):
             posteriori_cond = posteriori_action_hidden.repeat(repeated_diffusion_steps, 1, 1).float()
             state_repeated = state_tensor.repeat(repeated_diffusion_steps, 1, 1) if state_tensor is not None else None
 
-            # Extract vision features for DiT cross-attention injection
+            # Extract vision features directly from ViT for DiT cross-attention injection
             vis_feats_repeated = None
             if self.enable_vision_cross_attn:
-                vis_feats = self._extract_vision_features(
-                    posteriori_last_hidden.detach(),
-                    qwen_inputs_posteriori["input_ids"],
-                )
-                vis_feats_repeated = vis_feats.repeat(repeated_diffusion_steps, 1, 1).float()
+                vis_feats = self._extract_vision_features(qwen_inputs_posteriori)
+                if vis_feats is not None:
+                    vis_feats_repeated = vis_feats.repeat(repeated_diffusion_steps, 1, 1).float()
 
             prior_loss = self.action_model(priori_cond, actions_target_repeated, state_repeated, vision_features=vis_feats_repeated)
             main_loss = self.action_model(posteriori_cond, actions_target_repeated, state_repeated, vision_features=vis_feats_repeated)
@@ -479,13 +529,11 @@ class BayesianCAG(LangForce):
             )
 
         # ============================================================
-        # Vision features for DiT cross-attention injection
+        # Vision features directly from ViT for DiT cross-attention
         # ============================================================
         vis_feats = None
         if self.enable_vision_cross_attn:
-            vis_feats = self._extract_vision_features(
-                hidden_post, qwen_inputs_post["input_ids"],
-            )
+            vis_feats = self._extract_vision_features(qwen_inputs_post)
 
         # ============================================================
         # Action prediction with CAG guidance
