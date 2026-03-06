@@ -3,18 +3,21 @@
 """
 BayesianCAG Framework  (v2 – Latent Contrastive + Dynamic CAG)
 ==============================================================
-Training enhancements:
-  Latent Contrastive Alignment (InfoNCE) – forces the feature delta
-  (h_post − h_prior) to align with the language embedding direction.
+Standalone dual-branch VLA framework (no LangForce inheritance).
 
-Inference enhancements:
-  Token-wise Dynamic CAG – each action query token gets its own omega_k
-  derived from how much it attends to the language tokens.
+Training:
+  - Prior branch: (V + A + L) => proposal p(a|v)
+  - Posterior branch: (V + L + A) => pi(a|v,l)
+  - LLR regularizer with hard-token LLR + shortcut gate
+  - Latent Contrastive Alignment (InfoNCE)
+
+Inference:
+  - Token-wise Dynamic CAG with per-action-query omega
 
 Guidance modes:
-  * "latent"   – token-wise dynamic omega on latent features  (new, recommended)
-  * "action"   – uniform omega on final predicted actions      (original CAG)
-  * "velocity" – uniform omega on each flow-matching step      (principled but slower)
+  * "latent"   – token-wise dynamic omega on latent features  (recommended)
+  * "action"   – uniform omega on final predicted actions
+  * "velocity" – uniform omega on each flow-matching step
 """
 import sys
 from pathlib import Path
@@ -23,8 +26,9 @@ _workspace_root = Path(__file__).parent.parent.parent.parent
 if str(_workspace_root) not in sys.path:
     sys.path.insert(0, str(_workspace_root))
 
-from typing import List, Optional
+from typing import List, Optional, Set
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
@@ -32,27 +36,94 @@ from starVLA.training.trainer_utils import initialize_overwatch
 from deployment.model_server.tools.image_tools import to_pil_preserve
 from starVLA.training.trainer_utils.trainer_tools import resize_images
 from starVLA.model.tools import FRAMEWORK_REGISTRY
-from starVLA.model.framework.LangForce import LangForce, VISION_START_TOKEN_INDEX, VISION_END_TOKEN_INDEX
+from starVLA.model.framework.base_framework import baseframework
+from starVLA.model.modules.vlm import get_vlm_model
+from starVLA.model.modules.action_model.GR00T_ActionHeader import get_action_model, FlowmatchingActionHead
 
 logger = initialize_overwatch(__name__)
 
+# HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
+IGNORE_INDEX = -100
+
+# ===== Qwen special tokens =====
+VISION_START_TOKEN_INDEX = 151652  # <|vision_start|>
+VISION_END_TOKEN_INDEX   = 151654  # <|vision_end|>
+IMAGE_TOKEN_INDEX        = 151655  # <|image_pad|>
+VIDEO_TOKEN_INDEX        = 151656  # <|video_pad|>
+IM_START_TOKEN_INDEX     = 151644  # <|im_start|>
+IM_END_TOKEN_INDEX       = 151645  # <|im_end|>
+
 
 @FRAMEWORK_REGISTRY.register("BayesianCAG")
-class BayesianCAG(LangForce):
+class BayesianCAG(baseframework):
     """
-    BayesianCAG = LangForce + Latent Contrastive Alignment (train)
-                            + Token-wise Dynamic CAG       (inference).
+    BayesianCAG: Dual-branch VLA with Latent Contrastive Alignment (train)
+                 + Token-wise Dynamic CAG (inference).
 
-    Extra config keys (all under ``cfg.framework``):
+    Config keys (under ``cfg.framework``):
         guidance_omega      (float): Max guidance scale.         Default 2.0.
         guidance_mode       (str):   "latent"|"action"|"velocity". Default "latent".
         contrastive_weight  (float): InfoNCE loss weight.        Default 0.1.
         contrastive_tau     (float): InfoNCE temperature.        Default 0.07.
         omega_base          (float): Min per-token omega.        Default 1.0.
+        kl_weight           (float): LLR loss weight.            Default 0.1.
+        prior_loss_weight   (float): Prior action loss weight.   Default 0.3.
     """
 
     def __init__(self, config: Optional[dict] = None, **kwargs):
-        super().__init__(config=config, **kwargs)
+        super().__init__()
+        self.config = config
+        self.qwen_vl_interface = get_vlm_model(config=self.config)
+
+        # align dims
+        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = (
+            self.qwen_vl_interface.model.config.hidden_size
+        )
+
+        # Action tokens
+        self.num_latent_action_query = self.config.framework.qwenvl.get("num_latent_action_query", 32)
+        self.latent_action_query = "".join([f"<|action_{i}|>" for i in range(self.num_latent_action_query)])
+        self.action_token_ids = None  # cached {'first','last'}
+
+        # === Runtime action token registration ===
+        self._register_action_tokens()
+
+        # Action model
+        self.action_model: FlowmatchingActionHead = get_action_model(config=self.config)
+
+        self.future_action_window_size = config.framework.action_model.future_action_window_size
+        self.past_action_window_size = config.framework.action_model.past_action_window_size
+        self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
+
+        # ===== Loss weights =====
+        self.kl_weight = float(self.config.framework.get("kl_weight", 0.1))
+        self.prior_loss_weight = float(self.config.framework.get("prior_loss_weight", 0.3))
+
+        # ===== Training assert switch =====
+        self.assert_lang_span_match = bool(self.config.framework.get("assert_lang_span_match", True))
+
+        # ===== Detach prior cond switch =====
+        self.detach_prior_cond = bool(self.config.framework.get("detach_prior_cond", True))
+
+        # ===== Hard-token LLR =====
+        self.use_hard_token_llr = bool(self.config.framework.get("use_hard_token_llr", True))
+        self.hard_token_k = int(self.config.framework.get("hard_token_k", 16))
+        assert self.hard_token_k > 0
+
+        # ===== Shortcut gate =====
+        self.use_kl_gate = bool(self.config.framework.get("use_kl_gate", True))
+        self.kl_gate_momentum = float(self.config.framework.get("kl_gate_momentum", 0.99))
+        self.kl_gate_temp = float(self.config.framework.get("kl_gate_temp", 0.5))
+        self.kl_gate_tau_scale = float(self.config.framework.get("kl_gate_tau_scale", 0.7))
+        self.kl_gate_min = float(self.config.framework.get("kl_gate_min", 0.0))
+        self.kl_gate_max = float(self.config.framework.get("kl_gate_max", 1.0))
+
+        # cache im_end token id
+        self._im_end_id = None
+
+        # EMA buffer for posterior language-span NLL
+        self.register_buffer("post_nll_ema", torch.tensor(0.0, dtype=torch.float32))
+        self.register_buffer("post_nll_ema_inited", torch.tensor(0, dtype=torch.uint8))
 
         # CAG hyper-parameters
         self.guidance_omega = float(self.config.framework.get("guidance_omega", 2.0))
@@ -80,6 +151,296 @@ class BayesianCAG(LangForce):
         )
 
     # ------------------------------------------------------------------
+    # Runtime action token registration
+    # ------------------------------------------------------------------
+    def _register_action_tokens(self):
+        """
+        Ensure action tokens (<|action_0|>, ..., <|action_N|>) exist in the
+        tokenizer. If missing, add them and resize model embeddings.
+        """
+        tokenizer = self.qwen_vl_interface.processor.tokenizer
+        action_tokens = [f"<|action_{i}|>" for i in range(self.num_latent_action_query)]
+
+        vocab = tokenizer.get_vocab()
+        to_add = [t for t in action_tokens if t not in vocab]
+
+        if to_add:
+            old_embed = self.qwen_vl_interface.model.get_input_embeddings()
+            old_size = old_embed.weight.shape[0]
+
+            tokenizer.add_special_tokens({"additional_special_tokens": to_add})
+            new_size = old_size + len(to_add)
+            self.qwen_vl_interface.model.resize_token_embeddings(new_size)
+
+            new_embed = self.qwen_vl_interface.model.get_input_embeddings()
+            with torch.no_grad():
+                ref_vec = old_embed.weight.mean(dim=0)
+                for idx in range(old_size, new_size):
+                    new_embed.weight[idx].copy_(ref_vec)
+
+            logger.info(
+                f"[BayesianCAG] Added {len(to_add)} action tokens to tokenizer, "
+                f"resized embeddings {old_size} -> {new_size}"
+            )
+        else:
+            logger.info("[BayesianCAG] All action tokens already present in tokenizer")
+
+    # ------------------------------------------------------------------
+    # Token id helpers (from LangForce)
+    # ------------------------------------------------------------------
+    def _ensure_action_token_ids(self, tokenizer):
+        if self.action_token_ids is None:
+            self.action_token_ids = {
+                "first": tokenizer.convert_tokens_to_ids("<|action_0|>"),
+                "last": tokenizer.convert_tokens_to_ids(f"<|action_{self.num_latent_action_query-1}|>"),
+            }
+
+    def _ensure_im_end_id(self, tokenizer):
+        if self._im_end_id is None:
+            self._im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+    def _find_last_pos(self, seq_1d: torch.Tensor, token_id: int) -> int:
+        idx = (seq_1d == int(token_id)).nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            return -1
+        return int(idx[-1].item())
+
+    def _find_first_pos_after(self, seq_1d: torch.Tensor, token_id: int, start: int) -> int:
+        if start < 0:
+            start = 0
+        sub = seq_1d[start:]
+        idx = (sub == int(token_id)).nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            return -1
+        return int(start + idx[0].item())
+
+    # ------------------------------------------------------------------
+    # Action block helpers (from LangForce)
+    # ------------------------------------------------------------------
+    def _get_action_block_start(self, input_ids_1d: torch.Tensor, tokenizer) -> int:
+        self._ensure_action_token_ids(tokenizer)
+        first_id = self.action_token_ids["first"]
+        last_id = self.action_token_ids["last"]
+
+        pos = (input_ids_1d == int(first_id)).nonzero(as_tuple=True)[0]
+        if pos.numel() == 0:
+            return -1
+
+        start = int(pos[0].item())
+        end = start + self.num_latent_action_query
+        if end > input_ids_1d.shape[0]:
+            return -1
+        if int(input_ids_1d[end - 1].item()) != int(last_id):
+            return -1
+        return start
+
+    def _extract_action_query_hidden_states(
+        self,
+        hidden_states: torch.Tensor,   # [B, S, H]
+        input_ids: torch.Tensor,       # [B, S]
+        tokenizer,
+        return_starts: bool = False,
+    ):
+        self._ensure_action_token_ids(tokenizer)
+
+        B = hidden_states.shape[0]
+        out = []
+        starts = []
+        for b in range(B):
+            start = self._get_action_block_start(input_ids[b], tokenizer)
+            assert start != -1, "No valid contiguous action token block found in the sequence."
+            end = start + self.num_latent_action_query
+            out.append(hidden_states[b, start:end, :])
+            starts.append(start)
+
+        out = torch.stack(out, dim=0)  # [B, K, H]
+        if return_starts:
+            return out, torch.tensor(starts, device=input_ids.device, dtype=torch.long)
+        return out
+
+    # ------------------------------------------------------------------
+    # SHIFT-correct token-level NLL span (from LangForce)
+    # ------------------------------------------------------------------
+    def _token_nll_span(
+        self,
+        logits_1d: torch.Tensor,      # [S, V]
+        input_ids_1d: torch.Tensor,   # [S]
+        start: int,
+        end: int,
+        ignore_ids: Optional[Set[int]] = None,
+    ):
+        if end <= start:
+            return None, None
+        S = int(input_ids_1d.shape[0])
+        start = max(0, int(start))
+        end = min(S, int(end))
+        if end <= start:
+            return None, None
+
+        j = torch.arange(start, end, device=input_ids_1d.device, dtype=torch.long)
+        j = j[j > 0]
+        if j.numel() == 0:
+            return None, None
+
+        targets = input_ids_1d[j].long()
+
+        if ignore_ids is not None and len(ignore_ids) > 0:
+            keep = torch.ones_like(targets, dtype=torch.bool)
+            for tid in ignore_ids:
+                keep &= (targets != int(tid))
+            j = j[keep]
+            if j.numel() == 0:
+                return None, None
+            targets = input_ids_1d[j].long()
+
+        pred_pos = j - 1
+        pred_logits = logits_1d[pred_pos].float()  # [T, V]
+        nll = F.cross_entropy(pred_logits, targets, reduction="none")  # [T]
+        return nll, targets
+
+    # ------------------------------------------------------------------
+    # LLR with hard-token + shortcut gate (from LangForce)
+    # ------------------------------------------------------------------
+    def _compute_language_llr_from_boundaries(
+        self,
+        priori_logits: torch.Tensor,            # [B, S, V]
+        posteriori_logits: torch.Tensor,        # [B, S, V] (detached)
+        priori_input_ids: torch.Tensor,         # [B, S]
+        posteriori_input_ids: torch.Tensor,     # [B, S]
+        priori_action_starts: torch.Tensor,     # [B]
+        posteriori_action_starts: torch.Tensor, # [B]
+    ) -> torch.Tensor:
+        tokenizer = self.qwen_vl_interface.processor.tokenizer
+        self._ensure_im_end_id(tokenizer)
+
+        pad_id = tokenizer.pad_token_id
+        ignore_ids: Set[int] = set()
+        if pad_id is not None:
+            ignore_ids.add(int(pad_id))
+        ignore_ids.add(int(IMAGE_TOKEN_INDEX))
+        ignore_ids.add(int(VIDEO_TOKEN_INDEX))
+        ignore_ids.add(int(VISION_START_TOKEN_INDEX))
+        ignore_ids.add(int(VISION_END_TOKEN_INDEX))
+        ignore_ids.add(int(IM_START_TOKEN_INDEX))
+        ignore_ids.add(int(IM_END_TOKEN_INDEX))
+
+        B = int(priori_input_ids.shape[0])
+        K = self.num_latent_action_query
+
+        llr_vals = []
+        post_nll_means = []
+
+        for b in range(B):
+            ids_prior = priori_input_ids[b]
+            ids_post  = posteriori_input_ids[b]
+
+            a_start_prior = int(priori_action_starts[b].item())
+            a_start_post  = int(posteriori_action_starts[b].item())
+
+            # prior language span: [action_end : im_end)
+            lang_start_prior = a_start_prior + K
+            if lang_start_prior >= ids_prior.shape[0]:
+                continue
+            im_end = self._find_first_pos_after(ids_prior, self._im_end_id, lang_start_prior)
+            lang_end_prior = im_end if im_end != -1 else int(ids_prior.shape[0])
+            if lang_end_prior <= lang_start_prior:
+                continue
+
+            # post language span: [last(vision_end)+1 : action_start)
+            v_end_post = self._find_last_pos(ids_post, VISION_END_TOKEN_INDEX)
+            if v_end_post == -1:
+                continue
+            lang_start_post = v_end_post + 1
+            lang_end_post = a_start_post
+            if lang_end_post <= lang_start_post:
+                continue
+
+            # strict assertion: token-level equality
+            if self.training and self.assert_lang_span_match:
+                prior_span_ids = ids_prior[lang_start_prior:lang_end_prior]
+                post_span_ids  = ids_post[lang_start_post:lang_end_post]
+
+                if (prior_span_ids.numel() != post_span_ids.numel()) or (not torch.equal(prior_span_ids, post_span_ids)):
+                    prior_text = tokenizer.decode(prior_span_ids.tolist())
+                    post_text  = tokenizer.decode(post_span_ids.tolist())
+
+                    raise AssertionError(
+                        "\n[BayesianCAG] Language span mismatch detected!\n"
+                        f"Sample b={b}\n"
+                        f"PRIOR span idx: [{lang_start_prior}:{lang_end_prior}]  (len={prior_span_ids.numel()})\n"
+                        f"POST  span idx: [{lang_start_post}:{lang_end_post}]  (len={post_span_ids.numel()})\n"
+                        f"PRIOR span: {repr(prior_text)}\n"
+                        f"POST  span: {repr(post_text)}\n"
+                        f"PRIOR token ids (first 50): {prior_span_ids[:50].tolist()}\n"
+                        f"POST  token ids (first 50): {post_span_ids[:50].tolist()}\n"
+                        "This indicates your boundary-based language extraction is inconsistent (likely prompt/template issue)."
+                    )
+
+            # hard-token LLR
+            nll_prior, tok_prior = self._token_nll_span(
+                logits_1d=priori_logits[b],
+                input_ids_1d=ids_prior,
+                start=lang_start_prior,
+                end=lang_end_prior,
+                ignore_ids=ignore_ids,
+            )
+            nll_post, tok_post = self._token_nll_span(
+                logits_1d=posteriori_logits[b],
+                input_ids_1d=ids_post,
+                start=lang_start_post,
+                end=lang_end_post,
+                ignore_ids=ignore_ids,
+            )
+            if nll_prior is None or nll_post is None:
+                continue
+
+            post_nll_mean = nll_post.mean().detach()
+            post_nll_means.append(post_nll_mean)
+
+            if self.use_hard_token_llr:
+                if tok_prior is None or tok_post is None or tok_prior.shape != tok_post.shape or (not torch.equal(tok_prior, tok_post)):
+                    llr = (nll_post.mean() - nll_prior.mean())
+                else:
+                    k = min(self.hard_token_k, int(nll_post.numel()))
+                    if k <= 0:
+                        continue
+                    idx = torch.topk(nll_post.detach(), k=k, largest=True).indices
+                    llr = (nll_post[idx] - nll_prior[idx]).mean()
+            else:
+                llr = (nll_post.mean() - nll_prior.mean())
+
+            llr_vals.append(llr)
+
+        if len(llr_vals) == 0:
+            return torch.tensor(0.0, device=priori_logits.device, dtype=torch.float32)
+
+        llr_vals_t = torch.stack(llr_vals).float()
+        post_nll_means_t = torch.stack(post_nll_means).float()
+
+        # shortcut gate: update EMA threshold
+        if self.use_kl_gate and self.training:
+            batch_mean = post_nll_means_t.mean().detach()
+            with torch.no_grad():
+                if int(self.post_nll_ema_inited.item()) == 0:
+                    self.post_nll_ema.copy_(batch_mean)
+                    self.post_nll_ema_inited.fill_(1)
+                else:
+                    m = self.kl_gate_momentum
+                    self.post_nll_ema.copy_(m * self.post_nll_ema + (1.0 - m) * batch_mean)
+
+        # gate computation
+        if self.use_kl_gate:
+            tau = (self.post_nll_ema.detach() * float(self.kl_gate_tau_scale))
+            temp = max(float(self.kl_gate_temp), 1e-6)
+            g = torch.sigmoid((tau - post_nll_means_t) / temp)
+            if self.kl_gate_min != 0.0 or self.kl_gate_max != 1.0:
+                g = float(self.kl_gate_min) + (float(self.kl_gate_max) - float(self.kl_gate_min)) * g
+        else:
+            g = torch.ones_like(post_nll_means_t)
+
+        return (g * llr_vals_t).mean()
+
+    # ------------------------------------------------------------------
     # Helper: extract language hidden states from posteriori branch
     # ------------------------------------------------------------------
     def _extract_lang_hidden_states(
@@ -91,8 +452,6 @@ class BayesianCAG(LangForce):
         """
         Extract language token hidden states from the *posteriori* branch
         (layout: V + L + A) and mean-pool to [B, H].
-
-        Language span in posteriori: [last(vision_end)+1 : action_start)
         """
         B, S, H = hidden_states.shape
         lang_embs = []
@@ -120,26 +479,16 @@ class BayesianCAG(LangForce):
     ) -> torch.Tensor:
         """
         Extract spatial vision features directly from Qwen2.5-VL's ViT,
-        **bypassing** the LLM.  This preserves patch-level 2D spatial
-        information that AdaLN / LLM hidden states lose.
-
-        The visual encoder (``model.visual``) takes ``pixel_values`` and
-        ``image_grid_thw`` and returns ``[total_merged_patches, D_vis]``
-        where ``D_vis`` equals the LLM hidden size (after the internal
-        patch merger projection).
-
-        We split the flat output per sample using ``image_grid_thw`` and
-        pad to the longest sequence in the batch.
+        bypassing the LLM.
 
         Returns:
-            [B, N_vis_max, D_vis]  — pure ViT spatial features.
+            [B, N_vis_max, D_vis]  -- pure ViT spatial features.
         """
         pixel_values = qwen_inputs.get("pixel_values", None)
         image_grid_thw = qwen_inputs.get("image_grid_thw", None)
         if pixel_values is None or image_grid_thw is None:
             return None
 
-        # --- call the ViT directly (no LLM involved) ---
         with torch.no_grad():
             vit_output = self.qwen_vl_interface.model.visual(
                 pixel_values, grid_thw=image_grid_thw,
@@ -147,13 +496,6 @@ class BayesianCAG(LangForce):
 
         D_vis = vit_output.shape[-1]
 
-        # --- split per-image using grid_thw ---
-        # image_grid_thw: [num_images_total, 3]  (t, h_grid, w_grid)
-        # After the merger (2x2 by default), merged patches per image =
-        #   t * (h_grid // merge_size) * (w_grid // merge_size)
-        # but the visual encoder already handles the merge internally,
-        # so the output count per image = t * ceil(h/2) * ceil(w/2).
-        # We just use the total count directly from the output.
         merge_size = getattr(
             self.qwen_vl_interface.model.visual, "spatial_merge_size",
             getattr(self.qwen_vl_interface.model.visual, "merge_size", 2),
@@ -164,10 +506,6 @@ class BayesianCAG(LangForce):
             n = t * (h // merge_size) * (w // merge_size)
             patches_per_image.append(n)
 
-        # Figure out how many images belong to each batch sample.
-        # In Qwen2.5-VL preprocessing, images from all samples are
-        # concatenated.  We infer the per-sample split from the
-        # input_ids: count how many <|vision_start|> tokens per sample.
         input_ids = qwen_inputs.get("input_ids", None)
         if input_ids is not None:
             imgs_per_sample = []
@@ -175,11 +513,9 @@ class BayesianCAG(LangForce):
                 n_imgs = int((input_ids[b] == int(VISION_START_TOKEN_INDEX)).sum().item())
                 imgs_per_sample.append(n_imgs)
         else:
-            # fallback: assume equal split
             B_guess = max(1, len(patches_per_image))
             imgs_per_sample = [B_guess]
 
-        # Split vit_output per image, then group by sample
         per_image_feats = torch.split(vit_output, patches_per_image, dim=0)
         vis_list = []
         img_idx = 0
@@ -195,7 +531,6 @@ class BayesianCAG(LangForce):
             else:
                 vis_list.append(torch.zeros(1, D_vis, device=vit_output.device, dtype=vit_output.dtype))
 
-        # Pad to max length in batch
         max_len = max(v.shape[0] for v in vis_list)
         padded = []
         for v in vis_list:
@@ -214,10 +549,6 @@ class BayesianCAG(LangForce):
         delta_h: torch.Tensor,   # [B, H]
         lang_emb: torch.Tensor,  # [B, H]
     ) -> torch.Tensor:
-        """
-        InfoNCE: (delta_h_i, lang_emb_i) = positive pair,
-        all other lang_emb_j (j != i) = negatives.
-        """
         B = delta_h.shape[0]
         if B < 2:
             return torch.tensor(0.0, device=delta_h.device, dtype=delta_h.dtype)
@@ -225,13 +556,12 @@ class BayesianCAG(LangForce):
         delta_h_norm = F.normalize(delta_h.float(), dim=-1)
         lang_norm = F.normalize(lang_emb.float(), dim=-1)
 
-        # [B, B] similarity matrix
         logits = torch.mm(delta_h_norm, lang_norm.t()) / self.contrastive_tau
         labels = torch.arange(B, device=logits.device)
         return F.cross_entropy(logits, labels)
 
     # ------------------------------------------------------------------
-    # Training forward: LangForce losses + InfoNCE contrastive
+    # Training forward
     # ------------------------------------------------------------------
     def forward(
         self,
@@ -289,7 +619,7 @@ class BayesianCAG(LangForce):
             )
             posteriori_logits = qwenvl_outputs_posteriori.logits.detach()
 
-        # ===== LLR loss (from LangForce) =====
+        # ===== LLR loss =====
         kl_loss = self._compute_language_llr_from_boundaries(
             priori_logits=priori_logits,
             posteriori_logits=posteriori_logits,
@@ -300,9 +630,7 @@ class BayesianCAG(LangForce):
         )
 
         # ===== Latent Contrastive Alignment (InfoNCE) =====
-        # delta_h = h_post - h_prior, mean over K queries -> [B, H]
         delta_h = (posteriori_action_hidden - priori_action_hidden).mean(dim=1)
-        # lang embedding: mean-pool language tokens from posteriori hidden
         lang_emb = self._extract_lang_hidden_states(
             posteriori_last_hidden,
             qwen_inputs_posteriori["input_ids"],
@@ -338,7 +666,6 @@ class BayesianCAG(LangForce):
             posteriori_cond = posteriori_action_hidden.repeat(repeated_diffusion_steps, 1, 1).float()
             state_repeated = state_tensor.repeat(repeated_diffusion_steps, 1, 1) if state_tensor is not None else None
 
-            # Extract vision features directly from ViT for DiT cross-attention injection
             vis_feats_repeated = None
             if self.enable_vision_cross_attn:
                 vis_feats = self._extract_vision_features(qwen_inputs_posteriori)
@@ -376,10 +703,6 @@ class BayesianCAG(LangForce):
     ) -> torch.Tensor:
         """
         Per-action-query omega from last-layer attention over language tokens.
-
-        For Q_k, sum attention over language positions, min-max normalise,
-        linearly map to [omega_base, omega_max].
-
         Returns: [B, K, 1]
         """
         attn_last = attentions[-1]           # [B, num_heads, S, S]
@@ -428,14 +751,6 @@ class BayesianCAG(LangForce):
         guidance_mode: Optional[str] = None,
         **kwargs,
     ) -> dict:
-        """
-        Dual-path prediction with Token-wise Dynamic CAG.
-
-        guidance_mode:
-          "latent"   – token-wise dynamic omega on latent features (recommended)
-          "action"   – uniform omega on final actions
-          "velocity" – uniform omega on each denoising velocity step
-        """
         if not isinstance(examples, list):
             examples = [examples]
 
@@ -541,8 +856,6 @@ class BayesianCAG(LangForce):
         with torch.autocast("cuda", dtype=torch.float32):
             vis_feats_f = vis_feats.float() if vis_feats is not None else None
             if mode == "latent":
-                # --- Token-wise dynamic omega on latent features ---
-                # h_final = h_prior + omega_vec * (h_post - h_prior)
                 action_hidden_guided = (
                     action_hidden_prior + omega_vec * (action_hidden_post - action_hidden_prior)
                 )
@@ -558,7 +871,6 @@ class BayesianCAG(LangForce):
                     vision_features=vis_feats_f,
                 )
             else:
-                # --- Action-level guidance (uniform omega) ---
                 a_cond = self.action_model.predict_action(action_hidden_post, state_tensor, vision_features=vis_feats_f)
                 a_uncond = self.action_model.predict_action(action_hidden_prior, state_tensor, vision_features=vis_feats_f)
                 pred_actions = a_uncond + omega * (a_cond - a_uncond)
