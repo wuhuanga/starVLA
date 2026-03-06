@@ -707,11 +707,19 @@ class BayesianCAG(baseframework):
         Per-action-query omega from last-layer attention over language tokens.
         Returns: [B, K, 1]
         """
-        attn_last = attentions[-1]           # [B, num_heads, S, S]
-        attn_avg = attn_last.mean(dim=1)     # [B, S, S]
-
         B = input_ids.shape[0]
         K = self.num_latent_action_query
+
+        # FlashAttention does not return attention weights (all entries are None).
+        # Fall back to uniform omega when attention is unavailable.
+        if attentions is None or attentions[-1] is None:
+            return torch.full(
+                (B, K, 1), omega_max,
+                device=input_ids.device, dtype=torch.float32,
+            )
+
+        attn_last = attentions[-1]           # [B, num_heads, S, S]
+        attn_avg = attn_last.mean(dim=1)     # [B, S, S]
         omega_vecs = []
 
         for b in range(B):
