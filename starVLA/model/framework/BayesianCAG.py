@@ -576,6 +576,7 @@ class BayesianCAG(baseframework):
         state = [example["state"] for example in examples] if "state" in examples[0] else None
 
         # ===== Priori Branch (V + A + L) =====
+        self.qwen_vl_interface.set_adapter("prior")
         qwen_inputs_priori = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_priori,
@@ -598,6 +599,7 @@ class BayesianCAG(baseframework):
             priori_logits = qwenvl_outputs_priori.logits
 
         # ===== Posteriori Branch (V + L + A) =====
+        self.qwen_vl_interface.set_adapter("posterior")
         qwen_inputs_posteriori = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_posteriori,
@@ -780,6 +782,7 @@ class BayesianCAG(baseframework):
         # ============================================================
         # Branch 1: Posteriori  (V + L + A)  -->  a_cond
         # ============================================================
+        self.qwen_vl_interface.set_adapter("posterior")
         qwen_inputs_post = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_posteriori,
@@ -814,6 +817,7 @@ class BayesianCAG(baseframework):
         # ============================================================
         # Branch 2: Priori  (V + A + L)  -->  a_uncond
         # ============================================================
+        self.qwen_vl_interface.set_adapter("prior")
         qwen_inputs_prior = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_priori,

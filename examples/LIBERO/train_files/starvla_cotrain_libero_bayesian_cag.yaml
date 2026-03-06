@@ -16,6 +16,7 @@ framework:
     num_latent_action_query: 32
     # LoRA configuration (set use_lora: true to enable)
     use_lora: false
+    dual_lora: false             # true = separate LoRA adapters for prior/posterior branches
     lora_r: 16
     lora_alpha: 32
     lora_dropout: 0.05

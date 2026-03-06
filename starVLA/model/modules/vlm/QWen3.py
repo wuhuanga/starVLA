@@ -63,6 +63,8 @@ class _QWen3_VL_Interface(nn.Module):
         processor.tokenizer.padding_side = "left"
 
         # ===== Optional LoRA wrapping =====
+        self._has_lora = False
+        self._has_dual_lora = False
         if qwenvl_config.get("use_lora", False):
             from peft import LoraConfig, get_peft_model
             lora_r = qwenvl_config.get("lora_r", 16)
@@ -72,20 +74,35 @@ class _QWen3_VL_Interface(nn.Module):
                 "lora_target_modules",
                 ["q_proj", "v_proj", "k_proj", "o_proj"],
             )
-            lora_config = LoraConfig(
-                r=lora_r,
-                lora_alpha=lora_alpha,
-                target_modules=lora_target,
-                lora_dropout=lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            model = get_peft_model(model, lora_config)
+            dual_lora = qwenvl_config.get("dual_lora", False)
+
+            def _make_lora_config():
+                return LoraConfig(
+                    r=lora_r,
+                    lora_alpha=lora_alpha,
+                    target_modules=lora_target,
+                    lora_dropout=lora_dropout,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
+
+            if dual_lora:
+                model = get_peft_model(model, _make_lora_config(), adapter_name="posterior")
+                model.add_adapter("prior", _make_lora_config())
+                model.set_adapter("posterior")
+                self._has_dual_lora = True
+                logger.info(
+                    f"[DualLoRA] Applied dual LoRA to Qwen3-VL: r={lora_r}, "
+                    f"alpha={lora_alpha}, adapters=['prior', 'posterior']"
+                )
+            else:
+                model = get_peft_model(model, _make_lora_config())
+                logger.info(
+                    f"[LoRA] Applied LoRA to Qwen3-VL: r={lora_r}, alpha={lora_alpha}, "
+                    f"targets={lora_target}"
+                )
             model.print_trainable_parameters()
-            logger.info(
-                f"[LoRA] Applied LoRA to Qwen3-VL: r={lora_r}, alpha={lora_alpha}, "
-                f"targets={lora_target}"
-            )
+            self._has_lora = True
 
         self.model = model
         self.processor = processor
@@ -98,6 +115,11 @@ class _QWen3_VL_Interface(nn.Module):
         if "-Action" in model_id:
             self._ACTION_TOKEN_MIN = _ACTION_TOKEN_MIN
             self._ACTION_TOKEN_MAX = _ACTION_TOKEN_MAX
+
+    def set_adapter(self, adapter_name: str):
+        """Switch active LoRA adapter (only effective when dual_lora is enabled)."""
+        if self._has_dual_lora:
+            self.model.set_adapter(adapter_name)
 
     def forward(
         self,
