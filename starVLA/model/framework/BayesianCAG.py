@@ -703,9 +703,19 @@ class BayesianCAG(baseframework):
         # Unwrap PEFT wrapper(s) if present
         base = getattr(vlm, "base_model", vlm)
         base = getattr(base, "model", base)
-        # Qwen2.5-VL: base.model.layers[-1].self_attn
+        # Navigate to the inner Qwen2_5_VLModel
         inner = getattr(base, "model", base)
-        return inner.layers[-1].self_attn
+        # Newer transformers: Qwen2_5_VLModel has .language_model.layers
+        # Older transformers: Qwen2_5_VLModel has .layers directly
+        if hasattr(inner, "layers"):
+            return inner.layers[-1].self_attn
+        elif hasattr(inner, "language_model"):
+            return inner.language_model.layers[-1].self_attn
+        else:
+            raise AttributeError(
+                f"Cannot locate transformer layers on {type(inner).__name__}. "
+                f"Available attributes: {[n for n, _ in inner.named_children()]}"
+            )
 
     def _capture_last_layer_attn_weights(
         self,
