@@ -62,6 +62,31 @@ class _QWen3_VL_Interface(nn.Module):
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
+        # ===== Optional LoRA wrapping =====
+        if qwenvl_config.get("use_lora", False):
+            from peft import LoraConfig, get_peft_model
+            lora_r = qwenvl_config.get("lora_r", 16)
+            lora_alpha = qwenvl_config.get("lora_alpha", 32)
+            lora_dropout = qwenvl_config.get("lora_dropout", 0.05)
+            lora_target = qwenvl_config.get(
+                "lora_target_modules",
+                ["q_proj", "v_proj", "k_proj", "o_proj"],
+            )
+            lora_config = LoraConfig(
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                target_modules=lora_target,
+                lora_dropout=lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, lora_config)
+            model.print_trainable_parameters()
+            logger.info(
+                f"[LoRA] Applied LoRA to Qwen3-VL: r={lora_r}, alpha={lora_alpha}, "
+                f"targets={lora_target}"
+            )
+
         self.model = model
         self.processor = processor
         self.config = config
