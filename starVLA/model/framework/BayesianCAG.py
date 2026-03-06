@@ -694,11 +694,77 @@ class BayesianCAG(baseframework):
         }
 
     # ------------------------------------------------------------------
+    # Capture last-layer attention weights via forward hook
+    # (works regardless of attention implementation, including FlashAttention)
+    # ------------------------------------------------------------------
+    def _get_last_layer_attn(self):
+        """Return the last transformer layer's self_attn module."""
+        vlm = self.qwen_vl_interface.model
+        # Unwrap PEFT wrapper(s) if present
+        base = getattr(vlm, "base_model", vlm)
+        base = getattr(base, "model", base)
+        # Qwen2.5-VL: base.model.layers[-1].self_attn
+        inner = getattr(base, "model", base)
+        return inner.layers[-1].self_attn
+
+    def _capture_last_layer_attn_weights(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Register a one-shot forward hook on the last layer's self_attn to
+        manually compute attention weights from Q and K projections.
+
+        Returns: [B, num_heads, S, S] attention weights.
+        """
+        attn_module = self._get_last_layer_attn()
+        captured = {}
+
+        def _hook(module, args, output):
+            # The self_attn forward receives hidden_states as the first arg.
+            hidden_states = args[0]
+            B, S, _ = hidden_states.shape
+
+            # Compute Q, K via the module's projections
+            q = module.q_proj(hidden_states)
+            k = module.k_proj(hidden_states)
+
+            num_heads = module.num_heads
+            head_dim = module.head_dim
+            # GQA: K may have fewer heads than Q
+            num_kv_heads = getattr(module, "num_key_value_heads", num_heads)
+            num_kv_groups = num_heads // num_kv_heads
+
+            q = q.view(B, S, num_heads, head_dim).transpose(1, 2)      # [B, H_q, S, D]
+            k = k.view(B, S, num_kv_heads, head_dim).transpose(1, 2)   # [B, H_kv, S, D]
+
+            # Expand K heads to match Q heads for GQA
+            if num_kv_groups > 1:
+                k = k.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1)
+                k = k.reshape(B, num_heads, S, head_dim)                # [B, H_q, S, D]
+
+            scale = head_dim ** -0.5
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, S, S]
+
+            # Apply causal mask
+            causal = torch.triu(
+                torch.ones(S, S, device=attn_weights.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            attn_weights = attn_weights.masked_fill(causal.unsqueeze(0).unsqueeze(0), float("-inf"))
+            attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32)
+            captured["attn"] = attn_weights.detach()
+
+        handle = attn_module.register_forward_hook(_hook)
+        return handle, captured
+
+    # ------------------------------------------------------------------
     # Token-wise dynamic omega from attention weights
     # ------------------------------------------------------------------
     def _compute_token_omega(
         self,
-        attentions: tuple,           # tuple of per-layer [B, num_heads, S, S]
+        attn_avg: torch.Tensor,     # [B, S, S]  head-averaged attention
         input_ids: torch.Tensor,     # [B, S]
         action_starts: torch.Tensor, # [B]
         omega_max: float,
@@ -709,17 +775,6 @@ class BayesianCAG(baseframework):
         """
         B = input_ids.shape[0]
         K = self.num_latent_action_query
-
-        # FlashAttention does not return attention weights (all entries are None).
-        # Fall back to uniform omega when attention is unavailable.
-        if attentions is None or attentions[-1] is None:
-            return torch.full(
-                (B, K, 1), omega_max,
-                device=input_ids.device, dtype=torch.float32,
-            )
-
-        attn_last = attentions[-1]           # [B, num_heads, S, S]
-        attn_avg = attn_last.mean(dim=1)     # [B, S, S]
         omega_vecs = []
 
         for b in range(B):
@@ -796,14 +851,28 @@ class BayesianCAG(baseframework):
             instructions=instructions_posteriori,
         )
         need_attn = (mode == "latent")
+
+        # Register a forward hook to capture last-layer attention weights.
+        # This works with any attention backend (including FlashAttention).
+        hook_handle, hook_captured = None, {}
+        if need_attn:
+            hook_handle, hook_captured = self._capture_last_layer_attn_weights(
+                qwen_inputs_post.get("input_ids"),
+                qwen_inputs_post.get("attention_mask"),
+            )
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             outputs_post = self.qwen_vl_interface(
                 **qwen_inputs_post,
-                output_attentions=need_attn,
+                output_attentions=False,
                 output_hidden_states=True,
                 return_dict=True,
                 use_cache=False,
             )
+
+            if hook_handle is not None:
+                hook_handle.remove()
+
             hidden_post = outputs_post.hidden_states[-1]
             action_hidden_post, post_action_starts = self._extract_action_query_hidden_states(
                 hidden_post,
@@ -813,8 +882,11 @@ class BayesianCAG(baseframework):
             )  # [B, K, H], [B]
 
             if need_attn:
+                # Use hook-captured attention: [B, H, S, S] -> head-averaged [B, S, S]
+                attn_weights = hook_captured["attn"]  # [B, num_heads, S, S]
+                attn_avg = attn_weights.mean(dim=1)    # [B, S, S]
                 omega_vec = self._compute_token_omega(
-                    outputs_post.attentions,
+                    attn_avg,
                     qwen_inputs_post["input_ids"],
                     post_action_starts,
                     omega_max=omega,
