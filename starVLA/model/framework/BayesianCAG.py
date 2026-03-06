@@ -731,9 +731,12 @@ class BayesianCAG(baseframework):
         attn_module = self._get_last_layer_attn()
         captured = {}
 
-        def _hook(module, args, output):
-            # The self_attn forward receives hidden_states as the first arg.
-            hidden_states = args[0]
+        def _hook(module, args, kwargs, output):
+            # hidden_states may be positional (older transformers) or keyword (newer)
+            if args:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
             B, S, _ = hidden_states.shape
 
             # Compute Q, K via the module's projections
@@ -766,7 +769,7 @@ class BayesianCAG(baseframework):
             attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32)
             captured["attn"] = attn_weights.detach()
 
-        handle = attn_module.register_forward_hook(_hook)
+        handle = attn_module.register_forward_hook(_hook, with_kwargs=True)
         return handle, captured
 
     # ------------------------------------------------------------------
