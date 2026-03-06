@@ -51,6 +51,12 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             batch_size=per_device_batch_size,
             drop_last=False,
         )
+
+        # Optional: limit the number of training samples per epoch for quick experiments
+        max_samples = int(getattr(vla_dataset_cfg, "max_samples", 0))
+        if max_samples > 0 and max_samples < batch_sampler._num_samples:
+            logger.info(f"Limiting epoch from {batch_sampler._num_samples} to {max_samples} samples (max_samples)")
+            batch_sampler._num_samples = max_samples
         
         vla_train_dataloader = DataLoader(
             vla_dataset,
