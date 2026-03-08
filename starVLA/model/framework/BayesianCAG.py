@@ -489,9 +489,10 @@ class BayesianCAG(baseframework):
         if pixel_values is None or image_grid_thw is None:
             return None
 
+        vit_dtype = next(self.qwen_vl_interface.model.visual.parameters()).dtype
         with torch.no_grad():
             vit_output = self.qwen_vl_interface.model.visual(
-                pixel_values, grid_thw=image_grid_thw,
+                pixel_values.to(dtype=vit_dtype), grid_thw=image_grid_thw,
             )  # [total_merged_patches, D_vis]
 
         D_vis = vit_output.shape[-1]
