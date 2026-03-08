@@ -16,6 +16,11 @@ def main(args) -> None:
     # server = WebsocketPolicyServer(policy, host="localhost", port=10091)
     # server.serve_forever()
 
+    # Initialize accelerate state so that accelerate's logging utility works
+    # even in single-GPU / non-distributed inference.
+    from accelerate import PartialState
+    PartialState()
+
     vla = baseframework.from_pretrained( # TODO should auto detect framework from model path
         args.ckpt_path,
     )
