@@ -89,9 +89,6 @@ class BayesianCAG(baseframework):
         self.latent_action_query = "".join([f"<|action_{i}|>" for i in range(self.num_latent_action_query)])
         self.action_token_ids = None  # cached {'first','last'}
 
-        # === Runtime action token registration ===
-        self._register_action_tokens()
-
         # Action model
         self.action_model: FlowmatchingActionHead = get_action_model(config=self.config)
 
@@ -163,47 +160,6 @@ class BayesianCAG(baseframework):
             f"proj_dim={contrastive_proj_dim}, "
             f"omega_base={self.omega_base}, vision_cross_attn={self.enable_vision_cross_attn}"
         )
-
-    # ------------------------------------------------------------------
-    # Runtime action token registration
-    # ------------------------------------------------------------------
-    def _register_action_tokens(self):
-        """
-        Ensure action tokens (<|action_0|>, ..., <|action_N|>) exist in the
-        tokenizer.  If missing, add them and resize model embeddings.
-
-        Uses normal initialization (std matched to existing embeddings) instead
-        of mean-of-all-embeddings, so each action query starts with a distinct
-        representation — important for the flow-matching head to differentiate
-        query positions from the start.
-        """
-        tokenizer = self.qwen_vl_interface.processor.tokenizer
-        action_tokens = [f"<|action_{i}|>" for i in range(self.num_latent_action_query)]
-
-        vocab = tokenizer.get_vocab()
-        to_add = [t for t in action_tokens if t not in vocab]
-
-        if to_add:
-            old_embed = self.qwen_vl_interface.model.get_input_embeddings()
-            old_size = old_embed.weight.shape[0]
-
-            tokenizer.add_special_tokens({"additional_special_tokens": to_add})
-            new_size = old_size + len(to_add)
-            self.qwen_vl_interface.model.resize_token_embeddings(new_size)
-
-            new_embed = self.qwen_vl_interface.model.get_input_embeddings()
-            with torch.no_grad():
-                # Normal init: match the std of existing embeddings for stable training
-                embed_std = old_embed.weight.std().item()
-                for idx in range(old_size, new_size):
-                    new_embed.weight[idx].normal_(mean=0.0, std=embed_std)
-
-            logger.info(
-                f"[BayesianCAG] Added {len(to_add)} action tokens (normal init, std={embed_std:.4f}), "
-                f"resized embeddings {old_size} -> {new_size}"
-            )
-        else:
-            logger.info("[BayesianCAG] All action tokens already present in tokenizer")
 
     # ------------------------------------------------------------------
     # Token id helpers (from LangForce)
