@@ -166,10 +166,15 @@ class BayesianCAG(baseframework):
     # ------------------------------------------------------------------
     def _ensure_action_token_ids(self, tokenizer):
         if self.action_token_ids is None:
-            self.action_token_ids = {
-                "first": tokenizer.convert_tokens_to_ids("<|action_0|>"),
-                "last": tokenizer.convert_tokens_to_ids(f"<|action_{self.num_latent_action_query-1}|>"),
-            }
+            first = tokenizer.convert_tokens_to_ids("<|action_0|>")
+            last = tokenizer.convert_tokens_to_ids(f"<|action_{self.num_latent_action_query-1}|>")
+            if first is None or last is None:
+                raise RuntimeError(
+                    "Action tokens (<|action_0|>, ..., <|action_N|>) not found in tokenizer. "
+                    "Please run add_special_tokens_to_qwen.py with langforce_tokens.txt "
+                    "to add action tokens before training."
+                )
+            self.action_token_ids = {"first": first, "last": last}
 
     def _ensure_im_end_id(self, tokenizer):
         if self._im_end_id is None:
