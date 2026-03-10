@@ -152,6 +152,20 @@ class BayesianCAG(baseframework):
         self.enable_vision_cross_attn = bool(
             self.config.framework.action_model.get("enable_vision_cross_attn", False)
         )
+        if self.enable_vision_cross_attn:
+            vit_hidden_dim = getattr(
+                self.qwen_vl_interface.model.config, "vision_config", None
+            )
+            if vit_hidden_dim is not None:
+                vit_hidden_dim = getattr(vit_hidden_dim, "hidden_size", None) or getattr(vit_hidden_dim, "embed_dim", None)
+            if vit_hidden_dim is None:
+                vit_hidden_dim = 1280  # fallback
+            vis_cross_dim = int(self.config.framework.action_model.get("vision_cross_attn_dim", 2048))
+            if vit_hidden_dim != vis_cross_dim:
+                self.vis_proj = nn.Linear(vit_hidden_dim, vis_cross_dim)
+                logger.info(f"[BayesianCAG] Vision projection: {vit_hidden_dim} -> {vis_cross_dim}")
+            else:
+                self.vis_proj = None
 
         logger.info(
             f"[BayesianCAG] Full-param training (no LoRA), "
@@ -524,7 +538,13 @@ class BayesianCAG(baseframework):
                 padded.append(torch.cat([v, pad], dim=0))
             else:
                 padded.append(v)
-        return torch.stack(padded, dim=0)  # [B, N_vis_max, D_vis]
+        out = torch.stack(padded, dim=0)  # [B, N_vis_max, D_vis]
+
+        # Project ViT dim -> vision_cross_attn_dim if needed
+        if hasattr(self, "vis_proj") and self.vis_proj is not None:
+            out = self.vis_proj(out)
+
+        return out
 
     # ------------------------------------------------------------------
     # InfoNCE contrastive loss
