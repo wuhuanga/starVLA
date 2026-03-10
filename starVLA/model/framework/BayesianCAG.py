@@ -1,15 +1,16 @@
 # Copyright 2025 starVLA community. All rights reserved.
 # Licensed under the MIT License, Version 1.0 (the "License");
 """
-BayesianCAG Framework  (v2 – Latent Contrastive + Dynamic CAG)
-==============================================================
-Standalone dual-branch VLA framework (no LangForce inheritance).
+BayesianCAG Framework  (v3 – Full-param + Contrastive Projection + Dynamic CAG)
+================================================================================
+Standalone dual-branch VLA framework.
+Full parameter training (no LoRA), same action token format as LangForce.
 
 Training:
   - Prior branch: (V + A + L) => proposal p(a|v)
   - Posterior branch: (V + L + A) => pi(a|v,l)
   - LLR regularizer with hard-token LLR + shortcut gate
-  - Latent Contrastive Alignment (InfoNCE)
+  - Latent Contrastive Alignment (InfoNCE with learned projection head)
 
 Inference:
   - Token-wise Dynamic CAG with per-action-query omega
@@ -57,17 +58,21 @@ IM_END_TOKEN_INDEX       = 151645  # <|im_end|>
 @FRAMEWORK_REGISTRY.register("BayesianCAG")
 class BayesianCAG(baseframework):
     """
-    BayesianCAG: Dual-branch VLA with Latent Contrastive Alignment (train)
-                 + Token-wise Dynamic CAG (inference).
+    BayesianCAG: Full-param dual-branch VLA with Latent Contrastive Alignment
+                 (train) + Token-wise Dynamic CAG (inference).
+
+    Uses the same <|action_X|> token format as LangForce.
+    No LoRA — both branches share the same full-param backbone.
 
     Config keys (under ``cfg.framework``):
-        guidance_omega      (float): Max guidance scale.         Default 2.0.
-        guidance_mode       (str):   "latent"|"action"|"velocity". Default "latent".
-        contrastive_weight  (float): InfoNCE loss weight.        Default 0.1.
-        contrastive_tau     (float): InfoNCE temperature.        Default 0.07.
-        omega_base          (float): Min per-token omega.        Default 1.0.
-        kl_weight           (float): LLR loss weight.            Default 0.1.
-        prior_loss_weight   (float): Prior action loss weight.   Default 0.3.
+        guidance_omega       (float): Max guidance scale.            Default 2.0.
+        guidance_mode        (str):   "latent"|"action"|"velocity".  Default "latent".
+        contrastive_weight   (float): InfoNCE loss weight.           Default 0.1.
+        contrastive_tau      (float): InfoNCE temperature.           Default 0.07.
+        contrastive_proj_dim (int):   Projection head output dim.    Default 256.
+        omega_base           (float): Min per-token omega.           Default 1.0.
+        kl_weight            (float): LLR loss weight.               Default 0.1.
+        prior_loss_weight    (float): Prior action loss weight.      Default 0.3.
     """
 
     def __init__(self, config: Optional[dict] = None, **kwargs):
@@ -76,11 +81,10 @@ class BayesianCAG(baseframework):
         self.qwen_vl_interface = get_vlm_model(config=self.config)
 
         # align dims
-        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = (
-            self.qwen_vl_interface.model.config.hidden_size
-        )
+        hidden_size = self.qwen_vl_interface.model.config.hidden_size
+        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = hidden_size
 
-        # Action tokens
+        # Action tokens (same format as LangForce: <|action_X|>)
         self.num_latent_action_query = self.config.framework.qwenvl.get("num_latent_action_query", 32)
         self.latent_action_query = "".join([f"<|action_{i}|>" for i in range(self.num_latent_action_query)])
         self.action_token_ids = None  # cached {'first','last'}
@@ -136,6 +140,14 @@ class BayesianCAG(baseframework):
         self.contrastive_weight = float(self.config.framework.get("contrastive_weight", 0.1))
         self.contrastive_tau = float(self.config.framework.get("contrastive_tau", 0.07))
 
+        # Contrastive projection head (SimCLR-style: improves representation quality)
+        contrastive_proj_dim = int(self.config.framework.get("contrastive_proj_dim", 256))
+        self.contrastive_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, contrastive_proj_dim),
+        )
+
         # Token-wise dynamic omega range
         self.omega_base = float(self.config.framework.get("omega_base", 1.0))
 
@@ -145,8 +157,10 @@ class BayesianCAG(baseframework):
         )
 
         logger.info(
-            f"[BayesianCAG] omega={self.guidance_omega}, mode={self.guidance_mode}, "
+            f"[BayesianCAG] Full-param training (no LoRA), "
+            f"omega={self.guidance_omega}, mode={self.guidance_mode}, "
             f"contrastive_weight={self.contrastive_weight}, tau={self.contrastive_tau}, "
+            f"proj_dim={contrastive_proj_dim}, "
             f"omega_base={self.omega_base}, vision_cross_attn={self.enable_vision_cross_attn}"
         )
 
@@ -156,7 +170,12 @@ class BayesianCAG(baseframework):
     def _register_action_tokens(self):
         """
         Ensure action tokens (<|action_0|>, ..., <|action_N|>) exist in the
-        tokenizer. If missing, add them and resize model embeddings.
+        tokenizer.  If missing, add them and resize model embeddings.
+
+        Uses normal initialization (std matched to existing embeddings) instead
+        of mean-of-all-embeddings, so each action query starts with a distinct
+        representation — important for the flow-matching head to differentiate
+        query positions from the start.
         """
         tokenizer = self.qwen_vl_interface.processor.tokenizer
         action_tokens = [f"<|action_{i}|>" for i in range(self.num_latent_action_query)]
@@ -174,12 +193,13 @@ class BayesianCAG(baseframework):
 
             new_embed = self.qwen_vl_interface.model.get_input_embeddings()
             with torch.no_grad():
-                ref_vec = old_embed.weight.mean(dim=0)
+                # Normal init: match the std of existing embeddings for stable training
+                embed_std = old_embed.weight.std().item()
                 for idx in range(old_size, new_size):
-                    new_embed.weight[idx].copy_(ref_vec)
+                    new_embed.weight[idx].normal_(mean=0.0, std=embed_std)
 
             logger.info(
-                f"[BayesianCAG] Added {len(to_add)} action tokens to tokenizer, "
+                f"[BayesianCAG] Added {len(to_add)} action tokens (normal init, std={embed_std:.4f}), "
                 f"resized embeddings {old_size} -> {new_size}"
             )
         else:
@@ -549,14 +569,23 @@ class BayesianCAG(baseframework):
         delta_h: torch.Tensor,   # [B, H]
         lang_emb: torch.Tensor,  # [B, H]
     ) -> torch.Tensor:
+        """
+        InfoNCE with learned projection head (SimCLR-style).
+        Projecting to a lower-dim space before contrastive comparison
+        prevents representation collapse and improves alignment quality.
+        """
         B = delta_h.shape[0]
         if B < 2:
             return torch.tensor(0.0, device=delta_h.device, dtype=delta_h.dtype)
 
-        delta_h_norm = F.normalize(delta_h.float(), dim=-1)
-        lang_norm = F.normalize(lang_emb.float(), dim=-1)
+        # Project to contrastive space
+        z_delta = self.contrastive_proj(delta_h.float())
+        z_lang = self.contrastive_proj(lang_emb.float())
 
-        logits = torch.mm(delta_h_norm, lang_norm.t()) / self.contrastive_tau
+        z_delta = F.normalize(z_delta, dim=-1)
+        z_lang = F.normalize(z_lang, dim=-1)
+
+        logits = torch.mm(z_delta, z_lang.t()) / self.contrastive_tau
         labels = torch.arange(B, device=logits.device)
         return F.cross_entropy(logits, labels)
 
@@ -576,7 +605,6 @@ class BayesianCAG(baseframework):
         state = [example["state"] for example in examples] if "state" in examples[0] else None
 
         # ===== Priori Branch (V + A + L) =====
-        self.qwen_vl_interface.set_adapter("prior")
         qwen_inputs_priori = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_priori,
@@ -599,7 +627,6 @@ class BayesianCAG(baseframework):
             priori_logits = qwenvl_outputs_priori.logits
 
         # ===== Posteriori Branch (V + L + A) =====
-        self.qwen_vl_interface.set_adapter("posterior")
         qwen_inputs_posteriori = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_posteriori,
@@ -700,13 +727,8 @@ class BayesianCAG(baseframework):
     def _get_last_layer_attn(self):
         """Return the last transformer layer's self_attn module."""
         vlm = self.qwen_vl_interface.model
-        # Unwrap PEFT wrapper(s) if present
-        base = getattr(vlm, "base_model", vlm)
-        base = getattr(base, "model", base)
-        # Navigate to the inner Qwen2_5_VLModel
-        inner = getattr(base, "model", base)
-        # Newer transformers: Qwen2_5_VLModel has .language_model.layers
-        # Older transformers: Qwen2_5_VLModel has .layers directly
+        # Navigate to the inner model (Qwen2_5_VLModel / Qwen3VLModel)
+        inner = getattr(vlm, "model", vlm)
         if hasattr(inner, "layers"):
             return inner.layers[-1].self_attn
         elif hasattr(inner, "language_model"):
@@ -858,7 +880,6 @@ class BayesianCAG(baseframework):
         # ============================================================
         # Branch 1: Posteriori  (V + L + A)  -->  a_cond
         # ============================================================
-        self.qwen_vl_interface.set_adapter("posterior")
         qwen_inputs_post = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_posteriori,
@@ -910,7 +931,6 @@ class BayesianCAG(baseframework):
         # ============================================================
         # Branch 2: Priori  (V + A + L)  -->  a_uncond
         # ============================================================
-        self.qwen_vl_interface.set_adapter("prior")
         qwen_inputs_prior = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_priori,

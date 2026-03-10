@@ -4,10 +4,28 @@ Quickly add new special tokens to Qwen/Qwen2.5-VL-3B-Instruct (or compatible mod
 
 ## 运行
 
+### LangForce / BayesianCAG 框架 (推荐)
+
+使用 `<|action_X|>` 格式的 token (32个):
+
 ```bash
+source_model_id=playground/Pretrained_models/Qwen3-VL-4B-Instruct
+target_model_id=playground/Pretrained_models/Qwen3-VL-4B-Instruct-Action
+token_list=starVLA/model/modules/vlm/tools/add_qwen_special_tokens/langforce_tokens.txt
 
+python starVLA/model/modules/vlm/tools/add_qwen_special_tokens/add_special_tokens_to_qwen.py \
+  --model-id ${source_model_id} \
+  --tokens-file ${token_list} \
+  --save-dir ${target_model_id} \
+  --init-strategy normal
+```
 
-source_model_id=playground/Pretrained_models/Qwen3-VL-4B-Instruct-Fang
+### QwenFast 框架
+
+使用 `<robot_action_X>` 格式的 token (2048个):
+
+```bash
+source_model_id=playground/Pretrained_models/Qwen3-VL-4B-Instruct
 target_model_id=playground/Pretrained_models/Qwen3-VL-4B-Instruct-Action
 fast_token_list=starVLA/model/modules/vlm/tools/add_qwen_special_tokens/fast_tokens.txt
 
@@ -16,7 +34,6 @@ python starVLA/model/modules/vlm/tools/add_qwen_special_tokens/add_special_token
   --tokens-file ${fast_token_list} \
   --save-dir ${target_model_id} \
   --init-strategy normal
-  
 ```
 
 `tokens.txt` example:

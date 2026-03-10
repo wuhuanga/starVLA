@@ -10,17 +10,12 @@ is_debug: false
 framework:
   name: BayesianCAG
   qwenvl:
-    base_vlm: ./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct-Action
+    base_vlm: ./playground/Pretrained_models/Qwen3-VL-4B-Instruct-Action
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
     num_latent_action_query: 32
-    # LoRA configuration (set use_lora: true to enable)
+    # Full parameter training (no LoRA)
     use_lora: false
-    dual_lora: false             # true = separate LoRA adapters for prior/posterior branches
-    lora_r: 16
-    lora_alpha: 32
-    lora_dropout: 0.05
-    lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
   action_model:
     action_model_type: DiT-B
     action_hidden_dim: 1024
@@ -75,6 +70,7 @@ framework:
   # =====================================================================
   contrastive_weight: 0.1           # weight for InfoNCE loss (delta_h vs lang_emb)
   contrastive_tau: 0.07             # InfoNCE temperature
+  contrastive_proj_dim: 256         # projection head output dim (SimCLR-style)
 
   # =====================================================================
   # CAG inference hyper-parameters
