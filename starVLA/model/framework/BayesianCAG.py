@@ -152,20 +152,9 @@ class BayesianCAG(baseframework):
         self.enable_vision_cross_attn = bool(
             self.config.framework.action_model.get("enable_vision_cross_attn", False)
         )
+        self.vis_proj = None
         if self.enable_vision_cross_attn:
-            vit_hidden_dim = getattr(
-                self.qwen_vl_interface.model.config, "vision_config", None
-            )
-            if vit_hidden_dim is not None:
-                vit_hidden_dim = getattr(vit_hidden_dim, "hidden_size", None) or getattr(vit_hidden_dim, "embed_dim", None)
-            if vit_hidden_dim is None:
-                vit_hidden_dim = 1280  # fallback
-            vis_cross_dim = int(self.config.framework.action_model.get("vision_cross_attn_dim", 2048))
-            if vit_hidden_dim != vis_cross_dim:
-                self.vis_proj = nn.Linear(vit_hidden_dim, vis_cross_dim)
-                logger.info(f"[BayesianCAG] Vision projection: {vit_hidden_dim} -> {vis_cross_dim}")
-            else:
-                self.vis_proj = None
+            self._vis_cross_dim = int(self.config.framework.action_model.get("vision_cross_attn_dim", 2048))
 
         logger.info(
             f"[BayesianCAG] Full-param training (no LoRA), "
@@ -540,8 +529,13 @@ class BayesianCAG(baseframework):
                 padded.append(v)
         out = torch.stack(padded, dim=0)  # [B, N_vis_max, D_vis]
 
-        # Project ViT dim -> vision_cross_attn_dim if needed
-        if hasattr(self, "vis_proj") and self.vis_proj is not None:
+        # Lazily create projection if ViT output dim != vision_cross_attn_dim
+        if hasattr(self, "_vis_cross_dim") and D_vis != self._vis_cross_dim:
+            if self.vis_proj is None:
+                self.vis_proj = nn.Linear(D_vis, self._vis_cross_dim).to(
+                    device=out.device, dtype=out.dtype
+                )
+                logger.info(f"[BayesianCAG] Created vision projection: {D_vis} -> {self._vis_cross_dim}")
             out = self.vis_proj(out)
 
         return out
