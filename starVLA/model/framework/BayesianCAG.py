@@ -744,10 +744,11 @@ class BayesianCAG(baseframework):
             q = module.q_proj(hidden_states)
             k = module.k_proj(hidden_states)
 
-            num_heads = module.num_heads
+            # Qwen2/2.5VL store num_heads directly; Qwen3VL only has it in config
+            num_heads = getattr(module, "num_heads", None) or module.config.num_attention_heads
             head_dim = module.head_dim
             # GQA: K may have fewer heads than Q
-            num_kv_heads = getattr(module, "num_key_value_heads", num_heads)
+            num_kv_heads = getattr(module, "num_key_value_heads", None) or getattr(module.config, "num_key_value_heads", num_heads)
             num_kv_groups = num_heads // num_kv_heads
 
             q = q.view(B, S, num_heads, head_dim).transpose(1, 2)      # [B, H_q, S, D]
