@@ -464,6 +464,94 @@ class FlowmatchingActionHead(nn.Module):
             actions = actions + dt * pred_velocity
         return actions
 
+    @torch.no_grad()
+    def predict_action_guided_scheduled(
+        self,
+        vl_embs_cond: torch.Tensor,
+        vl_embs_uncond: torch.Tensor,
+        state: torch.Tensor = None,
+        omega_max: float = 3.0,
+        omega_min: float = 1.0,
+        schedule: str = "cosine",
+        vision_features: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Time-scheduled velocity-level CFG during flow-matching denoising.
+
+        omega decays from omega_max (early, noisy) to omega_min (late, clean):
+          - "linear":  omega(t) = omega_min + (omega_max - omega_min) * (t / T)
+          - "cosine":  omega(t) = omega_min + (omega_max - omega_min) * 0.5*(1+cos(pi*(1 - t/T)))
+
+        Early high omega ensures coarse trajectory follows the instruction;
+        late low omega avoids overshooting on fine motor adjustments.
+        """
+        import math
+
+        batch_size = vl_embs_cond.shape[0]
+        device = vl_embs_cond.device
+        actions = torch.randn(
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs_cond.dtype,
+            device=device,
+        )
+
+        num_steps = self.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        state_features = self.state_encoder(state) if state is not None else None
+
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+
+            # Time-scheduled omega: high at t=0 (noisy), low at t=T (clean)
+            progress = t / float(max(num_steps - 1, 1))  # 0 -> 1
+            if schedule == "cosine":
+                current_omega = omega_min + (omega_max - omega_min) * 0.5 * (1.0 + math.cos(math.pi * progress))
+            else:  # linear
+                current_omega = omega_max - (omega_max - omega_min) * progress
+
+            timesteps_tensor = torch.full(
+                size=(batch_size,), fill_value=t_discretized, device=device
+            )
+            action_features = self.action_encoder(actions, timesteps_tensor)
+
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+            sa_embs = (
+                torch.cat((state_features, future_tokens, action_features), dim=1)
+                if state_features is not None
+                else torch.cat((future_tokens, action_features), dim=1)
+            )
+
+            # Conditioned velocity (posterior)
+            out_cond = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs_cond,
+                timestep=timesteps_tensor,
+                vision_features=vision_features,
+            )
+            v_cond = self.action_decoder(out_cond)[:, -self.action_horizon:]
+
+            # Unconditioned velocity (prior)
+            out_uncond = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs_uncond,
+                timestep=timesteps_tensor,
+                vision_features=vision_features,
+            )
+            v_uncond = self.action_decoder(out_uncond)[:, -self.action_horizon:]
+
+            # Time-scheduled CFG
+            pred_velocity = v_uncond + current_omega * (v_cond - v_uncond)
+            actions = actions + dt * pred_velocity
+
+        return actions
+
     @property
     def device(self):
         return next(iter(self.parameters())).device
