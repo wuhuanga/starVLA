@@ -155,6 +155,11 @@ class BayesianCAG(baseframework):
         self.vis_proj = None
         if self.enable_vision_cross_attn:
             self._vis_cross_dim = int(self.config.framework.action_model.get("vision_cross_attn_dim", 2048))
+            # vit_output_dim: actual ViT output dim after spatial merge (e.g. 2560 for 7B, varies by model)
+            vit_output_dim = int(self.config.framework.action_model.get("vit_output_dim", 0))
+            if vit_output_dim > 0 and vit_output_dim != self._vis_cross_dim:
+                self.vis_proj = nn.Linear(vit_output_dim, self._vis_cross_dim)
+                logger.info(f"[BayesianCAG] Vision projection: {vit_output_dim} -> {self._vis_cross_dim}")
 
         logger.info(
             f"[BayesianCAG] Full-param training (no LoRA), "
@@ -529,13 +534,18 @@ class BayesianCAG(baseframework):
                 padded.append(v)
         out = torch.stack(padded, dim=0)  # [B, N_vis_max, D_vis]
 
-        # Lazily create projection if ViT output dim != vision_cross_attn_dim
-        if hasattr(self, "_vis_cross_dim") and D_vis != self._vis_cross_dim:
-            if self.vis_proj is None:
-                self.vis_proj = nn.Linear(D_vis, self._vis_cross_dim).to(
-                    device=out.device, dtype=out.dtype
-                )
-                logger.info(f"[BayesianCAG] Created vision projection: {D_vis} -> {self._vis_cross_dim}")
+        # Project ViT dim -> vision_cross_attn_dim if needed
+        if self.vis_proj is not None:
+            out = self.vis_proj(out)
+        elif hasattr(self, "_vis_cross_dim") and D_vis != self._vis_cross_dim:
+            # Fallback: lazy init (training only, won't survive save/load)
+            self.vis_proj = nn.Linear(D_vis, self._vis_cross_dim).to(
+                device=out.device, dtype=out.dtype
+            )
+            logger.warning(
+                f"[BayesianCAG] Lazily created vis_proj ({D_vis} -> {self._vis_cross_dim}). "
+                f"Set vit_output_dim: {D_vis} in config to avoid this."
+            )
             out = self.vis_proj(out)
 
         return out
