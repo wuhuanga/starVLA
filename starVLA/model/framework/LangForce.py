@@ -476,7 +476,7 @@ class LangForce(baseframework):
             actions_target = actions_t[:, -(self.future_action_window_size + 1):, :]  # [B, chunk_len, action_dim]
 
             repeated_diffusion_steps = (
-                self.config.trainer.get("repeated_diffusion_steps", 4) if self.config and self.config.trainer else 4
+                self.config.framework.action_model.get("repeated_diffusion_steps", 4) if self.config and self.config.framework else 4
             )
 
             state_tensor = None

@@ -153,7 +153,7 @@ class InternVLA_M1(baseframework):
 
             # tips: Repeat 'actions' 'repeated_diffusion_steps' times, resulting in [repeated_diffusion_steps*B, T, D]
             repeated_diffusion_steps = (
-                self.config.trainer.get("repeated_diffusion_steps", 4) if self.config and self.config.trainer else 4
+                self.config.framework.action_model.get("repeated_diffusion_steps", 4) if self.config and self.config.framework else 4
             )
             actions_repeated = actions_future.repeat(repeated_diffusion_steps, 1, 1)
             action_condition = action_condition.repeat(

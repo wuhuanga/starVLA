@@ -387,8 +387,9 @@ class TAGFlow(baseframework):
             s_k = attn_block.sum(dim=-1)                        # [K]
 
             # Sigmoid z-score: absolute threshold instead of relative min-max
+            # Use unbiased=False to avoid NaN when K=1 (single element std)
             s_mean = s_k.mean()
-            s_std = s_k.std() + 1e-6
+            s_std = s_k.std(unbiased=False) + 1e-6
             s_norm = torch.sigmoid((s_k - s_mean) / s_std)
 
             omega_k = self.omega_base + (omega_max - self.omega_base) * s_norm
@@ -449,8 +450,10 @@ class TAGFlow(baseframework):
             )
             actions_target = actions_t[:, -(self.future_action_window_size + 1):, :]
 
-            repeated_diffusion_steps = (
-                self.config.trainer.get("repeated_diffusion_steps", 4) if self.config and self.config.trainer else 4
+            repeated_diffusion_steps = int(
+                self.config.framework.action_model.get("repeated_diffusion_steps", 4)
+                if self.config and self.config.framework
+                else 4
             )
 
             state_tensor = None
@@ -495,18 +498,31 @@ class TAGFlow(baseframework):
     ) -> torch.Tensor:
         """
         Custom Euler integration with spatio-temporal guidance at the
-        **conditioning level** (NOT velocity level).
+        **velocity level** using batched cond/uncond DiT forward.
+
+        CFG must operate on velocity: v = v_uncond + omega * (v_cond - v_uncond).
+        Applying guidance on conditioning latents (h_guided = h_uncond + omega * delta)
+        feeds out-of-distribution "Frankenstein" embeddings into the DiT, because the
+        model only ever saw pure h_cond or h_uncond during training, never their
+        linear extrapolation.  The DiT's internal nonlinearities (attention, MLP)
+        make f(h_uncond + omega * delta) != f(h_uncond) + omega * (f(h_cond) - f(h_uncond)).
+
+        To keep efficiency high we concat cond and uncond into a single [2B] batch
+        for the DiT forward, then split the output and apply spatio-temporal omega
+        on the resulting velocity field.
+
+        Spatial omega [B, K, 1] is derived from per-action-query attention to
+        language tokens (sigmoid z-score).  We reduce it to a per-sample scalar
+        [B, 1, 1] for velocity-level guidance since the velocity tensor has shape
+        [B, action_horizon, action_dim] which differs from the K-dimensional
+        conditioning space.
 
         At each denoising step:
           1. Compute temporal decay based on denoising progress
-          2. Combine spatial_omega with temporal decay:
-             current_omega = 1 + (spatial_omega - 1) * temporal_decay
-          3. Guide conditioning: h = h_uncond + current_omega * (h_cond - h_uncond)
-          4. Run DiT ONCE with guided conditioning (not twice like velocity CFG)
+          2. Combine spatial_omega (reduced to per-sample) with temporal decay
+          3. Run DiT ONCE on [2B] batch (uncond || cond)
+          4. Split velocities, apply CFG: v = v_uncond + omega * (v_cond - v_uncond)
           5. Euler update
-
-        This is both more efficient (1 DiT pass vs 2) and more principled
-        (guidance in the conditioning space matches what the model sees in training).
         """
         am = self.action_model
         batch_size = action_hidden_cond.shape[0]
@@ -521,7 +537,22 @@ class TAGFlow(baseframework):
         num_steps = am.num_inference_timesteps
         dt = 1.0 / num_steps
 
+        # Concat cond/uncond conditioning for batched DiT forward
+        double_h = torch.cat([action_hidden_uncond, action_hidden_cond], dim=0)  # [2B, K, H]
+
         state_features = am.state_encoder(state_tensor) if state_tensor is not None else None
+        double_state_features = (
+            torch.cat([state_features, state_features], dim=0)
+            if state_features is not None else None
+        )
+        double_vis_feats = (
+            torch.cat([vis_feats, vis_feats], dim=0)
+            if vis_feats is not None else None
+        )
+
+        # Reduce spatial omega from [B, K, 1] to per-sample [B, 1, 1]
+        # (velocity shape [B, action_horizon, action_dim] != K)
+        spatial_omega_scalar = spatial_omega.mean(dim=1, keepdim=True)  # [B, 1, 1]
 
         for t in range(num_steps):
             t_cont = t / float(num_steps)
@@ -535,42 +566,38 @@ class TAGFlow(baseframework):
                 temporal_decay = 1.0 - progress
 
             # --- Spatio-temporal combined omega ---
-            # Scale the spatial omega by temporal decay:
-            # - Early steps (temporal_decay ~1): full spatial omega effect
-            # - Late steps (temporal_decay ~0): omega -> 1 (no guidance)
-            # Also clamp the overall scale between omega_min and omega_max
-            current_omega = 1.0 + (spatial_omega - 1.0) * temporal_decay  # [B, K, 1]
+            current_omega = 1.0 + (spatial_omega_scalar - 1.0) * temporal_decay  # [B, 1, 1]
 
-            # --- Guide the conditioning embeddings ---
-            h_guided = action_hidden_uncond + current_omega * (
-                action_hidden_cond - action_hidden_uncond
-            )  # [B, K, H]
-
-            # --- Standard DiT forward (single pass!) ---
+            # --- Batched DiT forward (uncond + cond in one pass) ---
+            double_actions = torch.cat([actions, actions], dim=0)  # [2B, T, D]
             timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device,
+                size=(2 * batch_size,), fill_value=t_discretized, device=device,
             )
-            action_features = am.action_encoder(actions, timesteps_tensor)
+            action_features = am.action_encoder(double_actions, timesteps_tensor)
 
             if am.config.add_pos_embed:
                 pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
                 pos_embs = am.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
 
-            future_tokens = am.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+            future_tokens = am.future_tokens.weight.unsqueeze(0).expand(2 * batch_size, -1, -1)
             sa_embs = (
-                torch.cat((state_features, future_tokens, action_features), dim=1)
-                if state_features is not None
+                torch.cat((double_state_features, future_tokens, action_features), dim=1)
+                if double_state_features is not None
                 else torch.cat((future_tokens, action_features), dim=1)
             )
 
             model_output = am.model(
                 hidden_states=sa_embs,
-                encoder_hidden_states=h_guided,
+                encoder_hidden_states=double_h,
                 timestep=timesteps_tensor,
-                vision_features=vis_feats,
+                vision_features=double_vis_feats,
             )
-            pred_velocity = am.action_decoder(model_output)[:, -am.action_horizon:]
+            double_velocity = am.action_decoder(model_output)[:, -am.action_horizon:]
+
+            # --- Split and apply velocity-level CFG ---
+            v_uncond, v_cond = torch.chunk(double_velocity, 2, dim=0)
+            pred_velocity = v_uncond + current_omega * (v_cond - v_uncond)
 
             # --- Euler update ---
             actions = actions + dt * pred_velocity

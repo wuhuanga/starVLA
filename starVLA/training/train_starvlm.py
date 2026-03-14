@@ -145,6 +145,18 @@ class VLMTrainer(TrainerUtils):
 
         freeze_modules = self.config.trainer.freeze_modules if hasattr(self.config.trainer, "freeze_modules") else None
         self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
+
+        # Enable gradient checkpointing to reduce VRAM usage
+        if getattr(self.config.trainer, "enable_gradient_checkpointing", False):
+            if hasattr(self.model, "qwen_vl_interface") and hasattr(self.model.qwen_vl_interface, "model"):
+                self.model.qwen_vl_interface.model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled for QwenVL backbone")
+            if hasattr(self.model, "action_model") and hasattr(self.model.action_model, "model"):
+                dit = self.model.action_model.model
+                if hasattr(dit, "gradient_checkpointing"):
+                    dit.gradient_checkpointing = True
+                    logger.info("Gradient checkpointing enabled for DiT action model")
+
         self.print_trainable_parameters(self.model)
 
         self.model, self.optimizer, self.lr_scheduler, self.vlm_train_dataloader = self.setup_distributed_training(
