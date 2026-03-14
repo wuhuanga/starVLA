@@ -1,37 +1,42 @@
 # Copyright 2025 starVLA community. All rights reserved.
 # Licensed under the MIT License, Version 1.0 (the "License");
 """
-TAG-Flow: Trajectory-Aligned Guided Flow Matching
-==================================================
-Single-branch VLA framework that replaces BayesianCAG's dual-branch architecture
-with a unified Condition Dropout + Trajectory-Action Contrastive Alignment
-+ Time-Scheduled CFG design.
+TAG-Flow v2: Trajectory-Aligned Guided Flow Matching
+=====================================================
+Single-branch VLA framework with two core innovations:
 
-Key innovations over BayesianCAG:
-  1. **Single VLM Forward**: Uses condition dropout (randomly replacing lang with
-     empty tokens during training) instead of running two separate VLM branches.
-     This halves compute and memory compared to BayesianCAG.
+Training ("大道至简"):
+  - Single VLM forward with condition dropout (p=cond_drop_rate).
+    Dropped samples: instruction = action_tokens only => p(a|v)  (prior)
+    Kept samples:    instruction = lang + action_tokens => pi(a|v,l) (posterior)
+  - Pure flow matching loss — no contrastive, no KL, no dual-branch.
+  - No Train-Test Gap: guidance operates on velocity / conditioning space,
+    which the DiT always sees during training.
 
-  2. **Action-Domain Contrastive Alignment**: Aligns trajectory features from the
-     DiT (action model) mid-layer with language features via InfoNCE, instead of
-     BayesianCAG's hidden-state subtraction approach.
+Inference ("时空双重 Guidance"):
+  Two VLM passes (cond + uncond), then a custom Euler integration loop with:
 
-  3. **Time-Scheduled Guidance**: At inference, omega decays from omega_max
-     (early denoising) to omega_min (late denoising) via cosine/linear schedule,
-     ensuring coarse direction follows instructions while fine motor control
-     stays smooth. Replaces BayesianCAG's unstable attention-based token-wise omega.
+  1. **Spatial** (Token-wise): Per-action-query omega computed from last-layer
+     attention using sigmoid z-score normalization (NOT min-max), so tokens
+     that genuinely don't attend to language get low omega.
 
-Training:
-  - Single branch with condition dropout: p(drop) = cond_drop_rate
-  - Dropped samples: instruction = action_tokens only  => p(a|v)  (prior)
-  - Kept samples: instruction = lang + action_tokens    => pi(a|v,l)  (posterior)
-  - Trajectory-language contrastive loss (InfoNCE) on kept samples
+  2. **Temporal** (Time-scheduled): omega decays from high (early, noisy steps)
+     to low (late, clean steps) via cosine/linear schedule, so coarse direction
+     follows the instruction while fine motor control stays smooth.
 
-Inference:
-  - Two VLM passes: one with lang (cond), one without (uncond)
-  - Time-scheduled CFG on flow-matching velocity field
+  3. **Combined**: current_omega = 1 + (spatial_omega - 1) * temporal_decay
+     Applied at the conditioning level: h_guided = h_uncond + omega * (h_cond - h_uncond)
+     then a single DiT forward per step (more efficient than velocity-level CFG
+     which needs 2 DiT passes per step).
+
+Guidance modes:
+  * "spatiotemporal" – token-wise spatial omega + temporal decay (recommended)
+  * "scheduled"      – uniform omega with time schedule (temporal only)
+  * "velocity"       – uniform omega on each flow-matching step (BayesianCAG compat)
+  * "action"         – uniform omega on final predicted actions
 """
 import sys
+import math
 from pathlib import Path
 
 _workspace_root = Path(__file__).parent.parent.parent.parent
@@ -68,18 +73,15 @@ VIDEO_TOKEN_INDEX        = 151656  # <|video_pad|>
 @FRAMEWORK_REGISTRY.register("TAGFlow")
 class TAGFlow(baseframework):
     """
-    TAG-Flow: Trajectory-Aligned Guided Flow Matching.
-
-    Single-branch VLA with condition dropout training + time-scheduled CFG inference.
+    TAG-Flow v2: Single-branch VLA with condition dropout + spatio-temporal guidance.
 
     Config keys (under ``cfg.framework``):
         cond_drop_rate       (float): Language dropout probability.     Default 0.15.
-        contrastive_weight   (float): InfoNCE loss weight.              Default 0.1.
-        contrastive_tau      (float): InfoNCE temperature.              Default 0.07.
-        contrastive_proj_dim (int):   Projection head output dim.       Default 256.
         omega_max            (float): Max guidance scale (early steps). Default 3.0.
         omega_min            (float): Min guidance scale (late steps).  Default 1.0.
+        omega_base           (float): Min per-token omega floor.        Default 1.0.
         omega_schedule       (str):   "cosine" or "linear".            Default "cosine".
+        guidance_mode        (str):   Default inference guidance mode.  Default "spatiotemporal".
     """
 
     def __init__(self, config: Optional[dict] = None, **kwargs):
@@ -106,30 +108,12 @@ class TAGFlow(baseframework):
         # ===== Condition Dropout =====
         self.cond_drop_rate = float(self.config.framework.get("cond_drop_rate", 0.15))
 
-        # ===== Trajectory-Language Contrastive Alignment =====
-        self.contrastive_weight = float(self.config.framework.get("contrastive_weight", 0.1))
-        self.contrastive_tau = float(self.config.framework.get("contrastive_tau", 0.07))
-        contrastive_proj_dim = int(self.config.framework.get("contrastive_proj_dim", 256))
-
-        # Trajectory feature projection head (projects DiT hidden_size -> proj_dim)
-        dit_hidden = int(self.config.framework.action_model.hidden_size)
-        self.traj_proj = nn.Sequential(
-            nn.Linear(dit_hidden, dit_hidden),
-            nn.GELU(),
-            nn.Linear(dit_hidden, contrastive_proj_dim),
-        )
-
-        # Language feature projection head (projects VLM hidden_size -> proj_dim)
-        self.lang_proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, contrastive_proj_dim),
-        )
-
-        # ===== Time-Scheduled Guidance =====
+        # ===== Spatio-Temporal Guidance =====
         self.omega_max = float(self.config.framework.get("omega_max", 3.0))
         self.omega_min = float(self.config.framework.get("omega_min", 1.0))
+        self.omega_base = float(self.config.framework.get("omega_base", 1.0))
         self.omega_schedule = str(self.config.framework.get("omega_schedule", "cosine"))
+        self.guidance_mode = str(self.config.framework.get("guidance_mode", "spatiotemporal"))
 
         # ===== Vision cross-attention injection in DiT =====
         self.enable_vision_cross_attn = bool(
@@ -144,11 +128,10 @@ class TAGFlow(baseframework):
                 logger.info(f"[TAGFlow] Vision projection: {vit_output_dim} -> {self._vis_cross_dim}")
 
         logger.info(
-            f"[TAGFlow] Single-branch with condition dropout={self.cond_drop_rate}, "
-            f"contrastive_weight={self.contrastive_weight}, tau={self.contrastive_tau}, "
-            f"proj_dim={contrastive_proj_dim}, "
+            f"[TAGFlow] Single-branch with cond_dropout={self.cond_drop_rate}, "
             f"omega_max={self.omega_max}, omega_min={self.omega_min}, "
-            f"schedule={self.omega_schedule}, "
+            f"omega_base={self.omega_base}, schedule={self.omega_schedule}, "
+            f"guidance_mode={self.guidance_mode}, "
             f"vision_cross_attn={self.enable_vision_cross_attn}"
         )
 
@@ -184,59 +167,35 @@ class TAGFlow(baseframework):
             return -1
         return start
 
-    def _extract_action_query_hidden_states(
-        self,
-        hidden_states: torch.Tensor,   # [B, S, H]
-        input_ids: torch.Tensor,       # [B, S]
-        tokenizer,
-    ):
-        self._ensure_action_token_ids(tokenizer)
-
-        B = hidden_states.shape[0]
-        out = []
-        for b in range(B):
-            start = self._get_action_block_start(input_ids[b], tokenizer)
-            assert start != -1, "No valid contiguous action token block found in the sequence."
-            end = start + self.num_latent_action_query
-            out.append(hidden_states[b, start:end, :])
-
-        return torch.stack(out, dim=0)  # [B, K, H]
-
-    # ------------------------------------------------------------------
-    # Extract language hidden states (V + L + A layout)
-    # ------------------------------------------------------------------
     def _find_last_pos(self, seq_1d: torch.Tensor, token_id: int) -> int:
         idx = (seq_1d == int(token_id)).nonzero(as_tuple=True)[0]
         if idx.numel() == 0:
             return -1
         return int(idx[-1].item())
 
-    def _extract_lang_hidden_states(
+    def _extract_action_query_hidden_states(
         self,
         hidden_states: torch.Tensor,   # [B, S, H]
         input_ids: torch.Tensor,       # [B, S]
-    ) -> torch.Tensor:
-        """
-        Extract language token hidden states from posterior layout (V + L + A)
-        and mean-pool to [B, H].
-        """
-        B, S, H = hidden_states.shape
-        tokenizer = self.qwen_vl_interface.processor.tokenizer
-        lang_embs = []
+        tokenizer,
+        return_starts: bool = False,
+    ):
+        self._ensure_action_token_ids(tokenizer)
+
+        B = hidden_states.shape[0]
+        out = []
+        starts = []
         for b in range(B):
-            ids = input_ids[b]
-            a_start = self._get_action_block_start(ids, tokenizer)
-            v_end = self._find_last_pos(ids, VISION_END_TOKEN_INDEX)
-            if v_end == -1 or a_start == -1:
-                lang_embs.append(torch.zeros(H, device=hidden_states.device, dtype=hidden_states.dtype))
-                continue
-            lang_start = v_end + 1
-            lang_end = a_start
-            if lang_end <= lang_start:
-                lang_embs.append(torch.zeros(H, device=hidden_states.device, dtype=hidden_states.dtype))
-                continue
-            lang_embs.append(hidden_states[b, lang_start:lang_end, :].mean(dim=0))
-        return torch.stack(lang_embs, dim=0)  # [B, H]
+            start = self._get_action_block_start(input_ids[b], tokenizer)
+            assert start != -1, "No valid contiguous action token block found in the sequence."
+            end = start + self.num_latent_action_query
+            out.append(hidden_states[b, start:end, :])
+            starts.append(start)
+
+        out = torch.stack(out, dim=0)  # [B, K, H]
+        if return_starts:
+            return out, torch.tensor(starts, device=input_ids.device, dtype=torch.long)
+        return out
 
     # ------------------------------------------------------------------
     # Extract raw ViT features from Qwen2.5-VL visual encoder
@@ -320,81 +279,125 @@ class TAGFlow(baseframework):
         return out
 
     # ------------------------------------------------------------------
-    # Trajectory-Language contrastive loss (InfoNCE)
+    # Attention capture (for spatio-temporal guidance)
     # ------------------------------------------------------------------
-    def _contrastive_loss(
+    def _get_last_layer_attn(self):
+        """Return the last transformer layer's self_attn module."""
+        vlm = self.qwen_vl_interface.model
+        inner = getattr(vlm, "model", vlm)
+        if hasattr(inner, "layers"):
+            return inner.layers[-1].self_attn
+        elif hasattr(inner, "language_model"):
+            return inner.language_model.layers[-1].self_attn
+        else:
+            raise AttributeError(
+                f"Cannot locate transformer layers on {type(inner).__name__}. "
+                f"Available attributes: {[n for n, _ in inner.named_children()]}"
+            )
+
+    def _capture_last_layer_attn_weights(
         self,
-        traj_feat: torch.Tensor,   # [B_cond, D_traj]  (from DiT mid-layer, mean-pooled)
-        lang_emb: torch.Tensor,    # [B_cond, H_vlm]   (from VLM language tokens)
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> tuple:
+        """
+        Register a one-shot forward hook on the last layer's self_attn to
+        manually compute attention weights from Q and K projections.
+        Works with any attention backend (including FlashAttention).
+
+        Returns: (hook_handle, captured_dict)
+        """
+        attn_module = self._get_last_layer_attn()
+        captured = {}
+
+        def _hook(module, args, kwargs, output):
+            if args:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            B, S, _ = hidden_states.shape
+
+            q = module.q_proj(hidden_states)
+            k = module.k_proj(hidden_states)
+
+            num_heads = getattr(module, "num_heads", None) or module.config.num_attention_heads
+            head_dim = module.head_dim
+            num_kv_heads = getattr(module, "num_key_value_heads", None) or getattr(module.config, "num_key_value_heads", num_heads)
+            num_kv_groups = num_heads // num_kv_heads
+
+            q = q.view(B, S, num_heads, head_dim).transpose(1, 2)
+            k = k.view(B, S, num_kv_heads, head_dim).transpose(1, 2)
+
+            if num_kv_groups > 1:
+                k = k.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1)
+                k = k.reshape(B, num_heads, S, head_dim)
+
+            scale = head_dim ** -0.5
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+            causal = torch.triu(
+                torch.ones(S, S, device=attn_weights.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            attn_weights = attn_weights.masked_fill(causal.unsqueeze(0).unsqueeze(0), float("-inf"))
+            attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32)
+            captured["attn"] = attn_weights.detach()
+
+        handle = attn_module.register_forward_hook(_hook, with_kwargs=True)
+        return handle, captured
+
+    # ------------------------------------------------------------------
+    # Token-wise spatial omega (sigmoid z-score, NOT min-max)
+    # ------------------------------------------------------------------
+    def _compute_spatial_omega(
+        self,
+        attn_avg: torch.Tensor,     # [B, S, S]  head-averaged attention
+        input_ids: torch.Tensor,     # [B, S]
+        action_starts: torch.Tensor, # [B]
+        omega_max: float,
     ) -> torch.Tensor:
         """
-        InfoNCE between trajectory features (projected from DiT) and
-        language features (projected from VLM), on conditioned samples only.
+        Per-action-query omega using sigmoid z-score normalization.
+
+        Unlike BayesianCAG's min-max normalization which always assigns omega_max
+        to at least one token (even when all tokens have low attention), this
+        approach uses absolute thresholds: tokens with genuinely low attention
+        to language get omega close to omega_base.
+
+        Returns: [B, K, 1]
         """
-        B = traj_feat.shape[0]
-        if B < 2:
-            return torch.tensor(0.0, device=traj_feat.device, dtype=traj_feat.dtype)
+        B = input_ids.shape[0]
+        K = self.num_latent_action_query
+        omega_vecs = []
 
-        z_traj = self.traj_proj(traj_feat.float())
-        z_lang = self.lang_proj(lang_emb.float())
+        for b in range(B):
+            ids = input_ids[b]
+            a_start = int(action_starts[b].item())
 
-        z_traj = F.normalize(z_traj, dim=-1)
-        z_lang = F.normalize(z_lang, dim=-1)
+            action_range = slice(a_start, a_start + K)
 
-        logits = torch.mm(z_traj, z_lang.t()) / self.contrastive_tau
-        labels = torch.arange(B, device=logits.device)
-        return F.cross_entropy(logits, labels)
+            v_end = self._find_last_pos(ids, VISION_END_TOKEN_INDEX)
+            if v_end == -1 or v_end + 1 >= a_start:
+                omega_vecs.append(torch.full((K,), omega_max, device=ids.device))
+                continue
+
+            lang_range = slice(v_end + 1, a_start)
+
+            attn_block = attn_avg[b, action_range, lang_range]  # [K, N_lang]
+            s_k = attn_block.sum(dim=-1)                        # [K]
+
+            # Sigmoid z-score: absolute threshold instead of relative min-max
+            s_mean = s_k.mean()
+            s_std = s_k.std() + 1e-6
+            s_norm = torch.sigmoid((s_k - s_mean) / s_std)
+
+            omega_k = self.omega_base + (omega_max - self.omega_base) * s_norm
+            omega_vecs.append(omega_k)
+
+        return torch.stack(omega_vecs, dim=0).unsqueeze(-1)  # [B, K, 1]
 
     # ------------------------------------------------------------------
-    # Extract trajectory features from DiT mid-layer
-    # ------------------------------------------------------------------
-    def _get_trajectory_feature(
-        self,
-        action_cond: torch.Tensor,   # [B, K, H_vlm]
-        actions_target: torch.Tensor, # [B, T, action_dim]
-        state: torch.Tensor = None,
-        vision_features: torch.Tensor = None,
-    ) -> torch.Tensor:
-        """
-        Run the action model's DiT forward and extract a pooled trajectory feature
-        from the model output (before decoding to action dim).
-        Returns: [B, hidden_size]
-        """
-        am = self.action_model
-
-        noise = torch.randn(actions_target.shape, device=actions_target.device, dtype=actions_target.dtype)
-        t = am.sample_time(actions_target.shape[0], device=actions_target.device, dtype=actions_target.dtype)
-        t = t[:, None, None]
-
-        noisy_trajectory = (1 - t) * noise + t * actions_target
-        t_discretized = (t[:, 0, 0] * am.num_timestep_buckets).long()
-        action_features = am.action_encoder(noisy_trajectory, t_discretized)
-
-        state_features = am.state_encoder(state) if state is not None else None
-
-        if am.config.add_pos_embed:
-            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=action_features.device)
-            pos_embs = am.position_embedding(pos_ids).unsqueeze(0)
-            action_features = action_features + pos_embs
-
-        future_tokens = am.future_tokens.weight.unsqueeze(0).expand(action_cond.shape[0], -1, -1)
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1) \
-            if state_features is not None else torch.cat((future_tokens, action_features), dim=1)
-
-        model_output = am.model(
-            hidden_states=sa_embs,
-            encoder_hidden_states=action_cond,
-            timestep=t_discretized,
-            return_all_hidden_states=False,
-            vision_features=vision_features,
-        )
-
-        # Mean-pool over sequence to get trajectory feature [B, output_dim]
-        traj_feat = model_output.mean(dim=1)
-        return traj_feat
-
-    # ------------------------------------------------------------------
-    # Training forward
+    # Training forward: 大道至简 (pure flow matching + condition dropout)
     # ------------------------------------------------------------------
     def forward(
         self,
@@ -410,19 +413,16 @@ class TAGFlow(baseframework):
         B = len(examples)
 
         # ===== Condition Dropout: single-branch design =====
-        # With probability cond_drop_rate, drop the language instruction
-        # so the model sees only action query tokens (unconditional / prior).
-        drop_mask = [random.random() < self.cond_drop_rate for _ in range(B)]
         instructions = []
         for i in range(B):
-            if drop_mask[i]:
-                # Unconditional: action tokens only (no language)
+            if random.random() < self.cond_drop_rate:
+                # Unconditional: action tokens only (no language, pure visual prior)
                 instructions.append(self.latent_action_query)
             else:
-                # Conditional: lang + action tokens (posterior layout V + L + A)
+                # Conditional: lang + action tokens (posterior: V + L + A)
                 instructions.append(batch_langs[i] + self.latent_action_query)
 
-        # ===== Single VLM Forward Pass =====
+        # ===== Single VLM Forward Pass (显存省一半，速度翻倍) =====
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions,
@@ -442,7 +442,7 @@ class TAGFlow(baseframework):
                 self.qwen_vl_interface.processor.tokenizer,
             )  # [B, K, H]
 
-        # ===== Action head: flow matching loss =====
+        # ===== Action head: pure flow matching loss =====
         with torch.autocast("cuda", dtype=torch.float32):
             actions_t = torch.tensor(
                 np.array(actions), device=action_hidden.device, dtype=action_hidden.dtype
@@ -474,46 +474,111 @@ class TAGFlow(baseframework):
                 vision_features=vis_feats_repeated,
             )
 
-        # ===== Trajectory-Language Contrastive Alignment (on conditioned samples only) =====
-        cond_indices = [i for i in range(B) if not drop_mask[i]]
-        contra_loss = torch.tensor(0.0, device=action_hidden.device, dtype=torch.float32)
-
-        if len(cond_indices) >= 2 and self.contrastive_weight > 0:
-            cond_idx_t = torch.tensor(cond_indices, device=action_hidden.device, dtype=torch.long)
-            cond_action_hidden = action_hidden[cond_idx_t].float()  # [B_cond, K, H]
-            cond_actions_target = actions_target[cond_idx_t]
-            cond_state = state_tensor[cond_idx_t] if state_tensor is not None else None
-            cond_vis = None
-            if self.enable_vision_cross_attn and vis_feats_repeated is not None:
-                cond_vis = self._extract_vision_features(qwen_inputs)
-                if cond_vis is not None:
-                    cond_vis = cond_vis[cond_idx_t].float()
-
-            with torch.autocast("cuda", dtype=torch.float32):
-                # Get trajectory features from DiT mid-layer
-                traj_feat = self._get_trajectory_feature(
-                    cond_action_hidden, cond_actions_target, cond_state, cond_vis,
-                )
-
-                # Get language features from VLM hidden states
-                lang_emb = self._extract_lang_hidden_states(
-                    last_hidden[cond_idx_t],
-                    qwen_inputs["input_ids"][cond_idx_t],
-                )
-
-                contra_loss = self._contrastive_loss(traj_feat, lang_emb)
-
-        # ===== Total loss =====
-        total_loss = flow_loss + self.contrastive_weight * contra_loss
-
         return {
-            "action_loss": total_loss,
+            "action_loss": flow_loss,
             "flow_loss": flow_loss.detach(),
-            "contra_loss": contra_loss.detach(),
         }
 
     # ------------------------------------------------------------------
-    # Inference: Time-Scheduled CFG
+    # Custom Euler loop with spatio-temporal conditioning-level guidance
+    # ------------------------------------------------------------------
+    def _predict_action_spatiotemporal(
+        self,
+        action_hidden_cond: torch.Tensor,    # [B, K, H]
+        action_hidden_uncond: torch.Tensor,  # [B, K, H]
+        spatial_omega: torch.Tensor,         # [B, K, 1]
+        state_tensor: Optional[torch.Tensor],
+        vis_feats: Optional[torch.Tensor],
+        omega_max: float,
+        omega_min: float,
+        schedule: str,
+    ) -> torch.Tensor:
+        """
+        Custom Euler integration with spatio-temporal guidance at the
+        **conditioning level** (NOT velocity level).
+
+        At each denoising step:
+          1. Compute temporal decay based on denoising progress
+          2. Combine spatial_omega with temporal decay:
+             current_omega = 1 + (spatial_omega - 1) * temporal_decay
+          3. Guide conditioning: h = h_uncond + current_omega * (h_cond - h_uncond)
+          4. Run DiT ONCE with guided conditioning (not twice like velocity CFG)
+          5. Euler update
+
+        This is both more efficient (1 DiT pass vs 2) and more principled
+        (guidance in the conditioning space matches what the model sees in training).
+        """
+        am = self.action_model
+        batch_size = action_hidden_cond.shape[0]
+        device = action_hidden_cond.device
+
+        actions = torch.randn(
+            size=(batch_size, am.config.action_horizon, am.config.action_dim),
+            dtype=action_hidden_cond.dtype,
+            device=device,
+        )
+
+        num_steps = am.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        state_features = am.state_encoder(state_tensor) if state_tensor is not None else None
+
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)
+            t_discretized = int(t_cont * am.num_timestep_buckets)
+
+            # --- Temporal decay: high omega early (noisy), low omega late (clean) ---
+            progress = t / float(max(num_steps - 1, 1))  # 0 -> 1
+            if schedule == "cosine":
+                temporal_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            else:  # linear
+                temporal_decay = 1.0 - progress
+
+            # --- Spatio-temporal combined omega ---
+            # Scale the spatial omega by temporal decay:
+            # - Early steps (temporal_decay ~1): full spatial omega effect
+            # - Late steps (temporal_decay ~0): omega -> 1 (no guidance)
+            # Also clamp the overall scale between omega_min and omega_max
+            current_omega = 1.0 + (spatial_omega - 1.0) * temporal_decay  # [B, K, 1]
+
+            # --- Guide the conditioning embeddings ---
+            h_guided = action_hidden_uncond + current_omega * (
+                action_hidden_cond - action_hidden_uncond
+            )  # [B, K, H]
+
+            # --- Standard DiT forward (single pass!) ---
+            timesteps_tensor = torch.full(
+                size=(batch_size,), fill_value=t_discretized, device=device,
+            )
+            action_features = am.action_encoder(actions, timesteps_tensor)
+
+            if am.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = am.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            future_tokens = am.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+            sa_embs = (
+                torch.cat((state_features, future_tokens, action_features), dim=1)
+                if state_features is not None
+                else torch.cat((future_tokens, action_features), dim=1)
+            )
+
+            model_output = am.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=h_guided,
+                timestep=timesteps_tensor,
+                vision_features=vis_feats,
+            )
+            pred_velocity = am.action_decoder(model_output)[:, -am.action_horizon:]
+
+            # --- Euler update ---
+            actions = actions + dt * pred_velocity
+
+        return actions
+
+    # ------------------------------------------------------------------
+    # Inference entry point
     # ------------------------------------------------------------------
     @torch.inference_mode()
     def predict_action(
@@ -537,7 +602,7 @@ class TAGFlow(baseframework):
         if omega is not None and omega > 0:
             o_max = omega
 
-        mode = guidance_mode if guidance_mode is not None else "scheduled"
+        mode = guidance_mode if guidance_mode is not None else self.guidance_mode
 
         # --- image pre-processing ---
         batch_images = []
@@ -554,13 +619,25 @@ class TAGFlow(baseframework):
 
         state = [ex["state"] for ex in examples] if "state" in examples[0] else None
 
-        # ===== Conditioned pass: V + L + A =====
+        tokenizer = self.qwen_vl_interface.processor.tokenizer
+
+        # ============================================================
+        # Conditioned pass: V + L + A
+        # ============================================================
         instructions_cond = [ex["lang"] + self.latent_action_query for ex in examples]
         qwen_inputs_cond = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions_cond,
         )
-        tokenizer = self.qwen_vl_interface.processor.tokenizer
+
+        # For spatiotemporal mode, capture attention weights from the cond pass
+        need_attn = (mode == "spatiotemporal")
+        hook_handle, hook_captured = None, {}
+        if need_attn:
+            hook_handle, hook_captured = self._capture_last_layer_attn_weights(
+                qwen_inputs_cond.get("input_ids"),
+                qwen_inputs_cond.get("attention_mask"),
+            )
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             outputs_cond = self.qwen_vl_interface(
@@ -570,12 +647,35 @@ class TAGFlow(baseframework):
                 return_dict=True,
                 use_cache=False,
             )
+
+            if hook_handle is not None:
+                hook_handle.remove()
+
             hidden_cond = outputs_cond.hidden_states[-1]
-            action_hidden_cond = self._extract_action_query_hidden_states(
+            action_hidden_cond, cond_action_starts = self._extract_action_query_hidden_states(
                 hidden_cond, qwen_inputs_cond["input_ids"], tokenizer,
+                return_starts=True,
             )
 
-        # ===== Unconditioned pass: A only (no language) =====
+            # Compute spatial omega from attention if in spatiotemporal mode
+            spatial_omega = None
+            if need_attn:
+                attn_weights = hook_captured["attn"]   # [B, num_heads, S, S]
+                attn_avg = attn_weights.mean(dim=1)     # [B, S, S]
+                spatial_omega = self._compute_spatial_omega(
+                    attn_avg,
+                    qwen_inputs_cond["input_ids"],
+                    cond_action_starts,
+                    omega_max=o_max,
+                )  # [B, K, 1]
+                spatial_omega = spatial_omega.to(
+                    dtype=action_hidden_cond.dtype,
+                    device=action_hidden_cond.device,
+                )
+
+        # ============================================================
+        # Unconditioned pass: A only (no language)
+        # ============================================================
         instructions_uncond = [self.latent_action_query for _ in examples]
         qwen_inputs_uncond = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
@@ -594,24 +694,42 @@ class TAGFlow(baseframework):
                 hidden_uncond, qwen_inputs_uncond["input_ids"], tokenizer,
             )
 
-        # ===== State tensor =====
+        # ============================================================
+        # State tensor
+        # ============================================================
         state_tensor = None
         if state is not None:
             state_tensor = torch.from_numpy(np.array(state)).to(
                 action_hidden_cond.device, dtype=action_hidden_cond.dtype
             )
 
-        # ===== Vision features =====
+        # ============================================================
+        # Vision features
+        # ============================================================
         vis_feats = None
         if self.enable_vision_cross_attn:
             vis_feats = self._extract_vision_features(qwen_inputs_cond)
 
-        # ===== Action prediction with time-scheduled guidance =====
+        # ============================================================
+        # Action prediction with guidance
+        # ============================================================
         with torch.autocast("cuda", dtype=torch.float32):
             vis_feats_f = vis_feats.float() if vis_feats is not None else None
 
-            if mode == "scheduled":
-                # Time-scheduled CFG (core TAG-Flow innovation)
+            if mode == "spatiotemporal":
+                # Core TAG-Flow innovation: spatio-temporal conditioning-level guidance
+                pred_actions = self._predict_action_spatiotemporal(
+                    action_hidden_cond=action_hidden_cond.float(),
+                    action_hidden_uncond=action_hidden_uncond.float(),
+                    spatial_omega=spatial_omega.float(),
+                    state_tensor=state_tensor,
+                    vis_feats=vis_feats_f,
+                    omega_max=o_max,
+                    omega_min=o_min,
+                    schedule=schedule,
+                )
+            elif mode == "scheduled":
+                # Time-scheduled velocity-level CFG (temporal only, uniform across tokens)
                 pred_actions = self.action_model.predict_action_guided_scheduled(
                     vl_embs_cond=action_hidden_cond.float(),
                     vl_embs_uncond=action_hidden_uncond.float(),
@@ -622,7 +740,7 @@ class TAGFlow(baseframework):
                     vision_features=vis_feats_f,
                 )
             elif mode == "velocity":
-                # Uniform omega on each denoising step (BayesianCAG-compatible)
+                # Uniform omega on each denoising step
                 pred_actions = self.action_model.predict_action_guided(
                     vl_embs_cond=action_hidden_cond.float(),
                     vl_embs_uncond=action_hidden_uncond.float(),
@@ -631,7 +749,7 @@ class TAGFlow(baseframework):
                     vision_features=vis_feats_f,
                 )
             elif mode == "action":
-                # Uniform omega on final actions (BayesianCAG-compatible)
+                # Uniform omega on final actions
                 a_cond = self.action_model.predict_action(
                     action_hidden_cond.float(), state_tensor, vision_features=vis_feats_f,
                 )
@@ -685,16 +803,21 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    # Test training forward
+    # Test training forward (clean: just flow_loss)
     out = model(batch)
-    print(f"Action Loss: {out['action_loss'].item()}, Flow Loss: {out['flow_loss'].item()}, "
-          f"Contra Loss: {out['contra_loss'].item()}")
+    print(f"Action Loss: {out['action_loss'].item()}, Flow Loss: {out['flow_loss'].item()}")
 
-    # Test scheduled guidance (default)
-    pred = model.predict_action([sample], omega_max=3.0, omega_min=1.0)
-    print(f"Scheduled guidance pred shape: {pred['normalized_actions'].shape}")
+    # Test spatio-temporal guidance (default, recommended)
+    pred = model.predict_action([sample], omega_max=3.0, omega_min=1.0,
+                                guidance_mode="spatiotemporal")
+    print(f"Spatio-temporal pred shape: {pred['normalized_actions'].shape}")
 
-    # Test velocity-level guidance (BayesianCAG-compatible)
+    # Test scheduled guidance (temporal only)
+    pred_s = model.predict_action([sample], omega_max=3.0, omega_min=1.0,
+                                  guidance_mode="scheduled")
+    print(f"Scheduled pred shape: {pred_s['normalized_actions'].shape}")
+
+    # Test velocity-level guidance
     pred_v = model.predict_action([sample], omega=2.0, guidance_mode="velocity")
     print(f"Velocity-level pred shape: {pred_v['normalized_actions'].shape}")
 

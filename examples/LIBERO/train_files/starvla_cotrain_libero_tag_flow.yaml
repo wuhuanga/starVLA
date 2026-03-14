@@ -50,26 +50,24 @@ framework:
   reduce_in_full_precision: true
 
   # =====================================================================
-  # TAG-Flow specific hyper-parameters
+  # TAG-Flow v2 hyper-parameters
   # =====================================================================
 
   # Condition Dropout: probability of dropping language instruction during training
   # (replaces BayesianCAG's dual-branch architecture with single forward + dropout)
   cond_drop_rate: 0.15
 
-  # Trajectory-Language Contrastive Alignment (InfoNCE)
-  # (aligns DiT trajectory features with VLM language features, replaces BayesianCAG's
-  #  hidden-state subtraction + attention-based contrastive approach)
-  contrastive_weight: 0.1
-  contrastive_tau: 0.07
-  contrastive_proj_dim: 256
-
-  # Time-Scheduled Guidance (inference only)
-  # omega decays from omega_max (early, noisy) to omega_min (late, clean)
-  # "cosine" schedule recommended; "linear" also available
-  omega_max: 3.0
-  omega_min: 1.0
-  omega_schedule: cosine
+  # Spatio-Temporal Guidance (inference only)
+  # "spatiotemporal" mode (recommended):
+  #   - Spatial: per-action-query omega from attention via sigmoid z-score
+  #   - Temporal: omega decays over denoising steps (cosine or linear)
+  #   - Combined at conditioning level (1 DiT pass/step, not 2)
+  # Also supports: "scheduled" (temporal only), "velocity", "action"
+  guidance_mode: spatiotemporal
+  omega_max: 3.0               # max guidance scale (early denoising steps)
+  omega_min: 1.0               # min guidance scale (late denoising steps)
+  omega_base: 1.0              # floor for per-token omega (spatial dimension)
+  omega_schedule: cosine        # "cosine" or "linear" temporal decay
 
 
 datasets:
