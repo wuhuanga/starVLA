@@ -408,6 +408,11 @@ class TAGFlow(baseframework):
         batch_images = [example["image"] for example in examples]
         batch_langs = [example["lang"] for example in examples]
 
+        # Resize images to prevent Qwen2.5-VL dynamic-resolution OOM
+        train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
+        if train_obs_image_size:
+            batch_images = resize_images(batch_images, target_size=train_obs_image_size)
+
         actions = [example["action"] for example in examples]
         state = [example["state"] for example in examples] if "state" in examples[0] else None
 

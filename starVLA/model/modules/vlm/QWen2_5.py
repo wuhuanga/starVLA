@@ -93,6 +93,22 @@ class _QWen_VL_Interface(nn.Module):
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
+        # Constrain vision token count to prevent dynamic-resolution OOM.
+        # Qwen2.5-VL default max_pixels (~1M) can produce thousands of vision
+        # tokens for high-res images.  Read limits from config if available.
+        _ds_cfg = getattr(config, "datasets", None)
+        _vlm_cfg = getattr(_ds_cfg, "vlm_data", None) if _ds_cfg else None
+        _max_px = int(getattr(_vlm_cfg, "max_pixels", 0)) if _vlm_cfg else 0
+        _min_px = int(getattr(_vlm_cfg, "min_pixels", 0)) if _vlm_cfg else 0
+        if _max_px > 0:
+            processor.image_processor.max_pixels = _max_px
+            processor.image_processor.size["longest_edge"] = _max_px
+            logger.info(f"[QWen_VL] processor max_pixels set to {_max_px}")
+        if _min_px > 0:
+            processor.image_processor.min_pixels = _min_px
+            processor.image_processor.size["shortest_edge"] = _min_px
+            logger.info(f"[QWen_VL] processor min_pixels set to {_min_px}")
+
         # ===== Optional LoRA wrapping =====
         self._has_lora = False
         self._has_dual_lora = False
