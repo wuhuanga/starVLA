@@ -1,3 +1,4 @@
+from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
@@ -295,8 +296,7 @@ def start_debugpy_once():
     if getattr(start_debugpy_once, "_started", False):
         return
     debugpy.listen(("0.0.0.0", 10092))
-    print("🔍 Waiting for VSCode attach on 0.0.0.0:10092 ...")
-    debugpy.wait_for_client()
+    print("🔍 Debug server started at 10092")
     start_debugpy_once._started = True
 
 if __name__ == "__main__":

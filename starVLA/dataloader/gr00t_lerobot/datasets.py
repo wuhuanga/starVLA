@@ -144,10 +144,11 @@ def _get_action_col_slices(
             raise ValueError(f"Invalid action key {action_key}. Expected prefix 'action.'.")
         state_key = action_mode_state_map.get(action_key, action_key.replace("action.", "state.", 1))
         if state_key not in state_keys_full:
-            raise ValueError(
-                f"State key {state_key} not found for action key {action_key}. "
-                f"Add it to action_mode_state_map or remove {action_key} from action_mode_apply_keys."
+            print(
+                f"[WARNING] State key {state_key} not found for action key {action_key}. "
+                f"Skipping delta statistics for this key (will use absolute statistics instead)."
             )
+            continue
 
         action_subkey = action_key.replace("action.", "", 1)
         state_subkey = state_key.replace("state.", "", 1)
