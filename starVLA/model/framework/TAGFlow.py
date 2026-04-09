@@ -115,6 +115,16 @@ class TAGFlow(baseframework):
         self.omega_schedule = str(self.config.framework.get("omega_schedule", "cosine"))
         self.guidance_mode = str(self.config.framework.get("guidance_mode", "spatiotemporal"))
 
+        # ===== CFG Divergence Re-Vision =====
+        # NOTE: requires num_inference_timesteps >= cfg_div_window + 3 to have
+        # enough data points.  With only 4 steps and window=3, detection is
+        # effectively disabled (too few data points for meaningful statistics).
+        # Increase num_inference_timesteps (e.g. 8-16) or decrease window to 2.
+        self.cfg_div_window = int(self.config.framework.get("cfg_div_window", 3))
+        self.cfg_div_drop_ratio = float(self.config.framework.get("cfg_div_drop_ratio", 0.3))
+        self.cfg_div_oscillation_thresh = float(self.config.framework.get("cfg_div_oscillation_thresh", 0.5))
+        self.cfg_div_max_revisions = int(self.config.framework.get("cfg_div_max_revisions", 2))
+
         # ===== Vision cross-attention injection in DiT =====
         self.enable_vision_cross_attn = bool(
             self.config.framework.action_model.get("enable_vision_cross_attn", False)
@@ -132,7 +142,10 @@ class TAGFlow(baseframework):
             f"omega_max={self.omega_max}, omega_min={self.omega_min}, "
             f"omega_base={self.omega_base}, schedule={self.omega_schedule}, "
             f"guidance_mode={self.guidance_mode}, "
-            f"vision_cross_attn={self.enable_vision_cross_attn}"
+            f"vision_cross_attn={self.enable_vision_cross_attn}, "
+            f"cfg_div_window={self.cfg_div_window}, "
+            f"cfg_div_drop_ratio={self.cfg_div_drop_ratio}, "
+            f"cfg_div_max_revisions={self.cfg_div_max_revisions}"
         )
 
     # ------------------------------------------------------------------
@@ -488,6 +501,108 @@ class TAGFlow(baseframework):
         }
 
     # ------------------------------------------------------------------
+    # CFG Divergence Re-Vision helpers
+    # ------------------------------------------------------------------
+    def _check_need_revison(
+        self, div_history: list, step: int, num_steps: int,
+    ) -> bool:
+        """
+        Check if CFG divergence signals a need for re-vision.
+
+        Key insight: in flow matching, delta_v **naturally** decays across
+        denoising steps (large early, small late) because the trajectory
+        converges.  Naively comparing absolute delta_v to a window mean
+        will always trigger at late steps.
+
+        Instead we track the **step-over-step decay ratio**:
+            r_t = delta_v[t] / delta_v[t-1]
+        Normal convergence has a smooth, relatively stable r_t (e.g. 0.3-0.8).
+        Anomalous conditions show up as:
+
+        Trigger 1 — Abnormal acceleration: r_t drops far below the running
+            average of recent ratios.  This means delta_v collapsed much
+            faster than the established trend, i.e. the conditioned signal
+            suddenly lost information.
+
+        Trigger 2 — Non-monotonic oscillation: delta_v *increases* then
+            *decreases* (or vice versa) within the window, meaning the model
+            is flickering — unable to maintain a coherent conditioned velocity.
+
+        We also skip the first few steps and the very last step where
+        detection is unreliable.
+        """
+        W = self.cfg_div_window
+        # Need at least W+2 history entries to compute W+1 ratios and have
+        # a baseline; also skip the very last step (natural convergence).
+        if len(div_history) < W + 2:
+            return False
+        if step >= num_steps - 1:
+            return False
+
+        # Compute step-over-step decay ratios
+        ratios = []
+        for i in range(1, len(div_history)):
+            prev = div_history[i - 1]
+            if prev < 1e-12:
+                ratios.append(1.0)
+            else:
+                ratios.append(div_history[i] / prev)
+
+        current_ratio = ratios[-1]
+        baseline_ratios = ratios[-(W + 1):-1]  # W ratios before the current
+        baseline_mean = sum(baseline_ratios) / len(baseline_ratios)
+
+        # Trigger 1: current ratio drops far below baseline trend
+        # (conditioned signal collapsed faster than normal convergence)
+        if baseline_mean > 1e-8 and current_ratio < self.cfg_div_drop_ratio * baseline_mean:
+            return True
+
+        # Trigger 2: non-monotonic oscillation in the recent window
+        # Count sign changes in consecutive differences of delta_v
+        recent = div_history[-W:]
+        diffs = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+        if len(diffs) >= 2:
+            sign_changes = sum(
+                1 for i in range(1, len(diffs))
+                if diffs[i] * diffs[i - 1] < 0
+            )
+            # In a W=3 window we have 2 diffs → at most 1 sign change.
+            # For W=4: 3 diffs → flag at >=2.  Threshold: >50% of possible.
+            max_possible = len(diffs) - 1
+            if max_possible > 0 and sign_changes / max_possible > self.cfg_div_oscillation_thresh:
+                return True
+
+        return False
+
+    def _revise_cond_hidden(self, vision_ctx: dict) -> torch.Tensor:
+        """
+        Re-run the conditioned VLM forward pass using the context stored
+        in vision_ctx to obtain fresh action_hidden_cond.
+
+        This is called when CFG divergence indicates the current visual
+        conditioning has gone stale (e.g. object moved, occlusion).
+        """
+        tokenizer = self.qwen_vl_interface.processor.tokenizer
+
+        qwen_inputs_cond = self.qwen_vl_interface.build_qwenvl_inputs(
+            images=vision_ctx["images"],
+            instructions=vision_ctx["instructions_cond"],
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            outputs_cond = self.qwen_vl_interface(
+                **qwen_inputs_cond,
+                output_attentions=False,
+                output_hidden_states=True,
+                return_dict=True,
+                use_cache=False,
+            )
+            hidden_cond = outputs_cond.hidden_states[-1]
+            action_hidden_cond = self._extract_action_query_hidden_states(
+                hidden_cond, qwen_inputs_cond["input_ids"], tokenizer,
+            )
+        return action_hidden_cond.float()
+
+    # ------------------------------------------------------------------
     # Custom Euler loop with spatio-temporal conditioning-level guidance
     # ------------------------------------------------------------------
     def _predict_action_spatiotemporal(
@@ -500,34 +615,22 @@ class TAGFlow(baseframework):
         omega_max: float,
         omega_min: float,
         schedule: str,
+        vision_ctx: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         Custom Euler integration with spatio-temporal guidance at the
         **velocity level** using batched cond/uncond DiT forward.
 
+        CFG Divergence Re-Vision:
+          Monitors delta_v = ||v_cond - v_uncond||^2 across denoising steps.
+          When delta_v suddenly drops (visual conditioning went stale) or
+          oscillates wildly (model confused by changed scene), triggers a
+          re-vision pass: re-runs the Qwen-VL forward to refresh
+          action_hidden_cond from the current camera frame.
+
         CFG must operate on velocity: v = v_uncond + omega * (v_cond - v_uncond).
-        Applying guidance on conditioning latents (h_guided = h_uncond + omega * delta)
-        feeds out-of-distribution "Frankenstein" embeddings into the DiT, because the
-        model only ever saw pure h_cond or h_uncond during training, never their
-        linear extrapolation.  The DiT's internal nonlinearities (attention, MLP)
-        make f(h_uncond + omega * delta) != f(h_uncond) + omega * (f(h_cond) - f(h_uncond)).
-
-        To keep efficiency high we concat cond and uncond into a single [2B] batch
-        for the DiT forward, then split the output and apply spatio-temporal omega
-        on the resulting velocity field.
-
-        Spatial omega [B, K, 1] is derived from per-action-query attention to
-        language tokens (sigmoid z-score).  We reduce it to a per-sample scalar
-        [B, 1, 1] for velocity-level guidance since the velocity tensor has shape
-        [B, action_horizon, action_dim] which differs from the K-dimensional
-        conditioning space.
-
-        At each denoising step:
-          1. Compute temporal decay based on denoising progress
-          2. Combine spatial_omega (reduced to per-sample) with temporal decay
-          3. Run DiT ONCE on [2B] batch (uncond || cond)
-          4. Split velocities, apply CFG: v = v_uncond + omega * (v_cond - v_uncond)
-          5. Euler update
+        To keep efficiency high we concat cond and uncond into a single [2B]
+        batch for the DiT forward, then split and apply spatio-temporal omega.
         """
         am = self.action_model
         batch_size = action_hidden_cond.shape[0]
@@ -556,8 +659,11 @@ class TAGFlow(baseframework):
         )
 
         # Reduce spatial omega from [B, K, 1] to per-sample [B, 1, 1]
-        # (velocity shape [B, action_horizon, action_dim] != K)
         spatial_omega_scalar = spatial_omega.mean(dim=1, keepdim=True)  # [B, 1, 1]
+
+        # CFG divergence tracking
+        div_history = []
+        revision_count = 0
 
         for t in range(num_steps):
             t_cont = t / float(num_steps)
@@ -602,6 +708,37 @@ class TAGFlow(baseframework):
 
             # --- Split and apply velocity-level CFG ---
             v_uncond, v_cond = torch.chunk(double_velocity, 2, dim=0)
+
+            # --- CFG Divergence Monitoring ---
+            # delta_v = mean ||v_cond - v_uncond||^2 across batch
+            delta_v = (v_cond - v_uncond).pow(2).mean().item()
+            div_history.append(delta_v)
+
+            if (vision_ctx is not None
+                    and revision_count < self.cfg_div_max_revisions
+                    and self._check_need_revison(div_history, t, num_steps)):
+                revision_count += 1
+                logger.info(
+                    f"[TAGFlow] Re-vision triggered at step {t}/{num_steps}, "
+                    f"delta_v={delta_v:.6f}, revision #{revision_count}"
+                )
+                # Re-run VLM conditioned pass to refresh visual conditioning
+                action_hidden_cond = self._revise_cond_hidden(vision_ctx)
+                # Rebuild double_h with fresh cond hidden states
+                double_h = torch.cat([action_hidden_uncond, action_hidden_cond], dim=0)
+                # Re-run DiT forward with refreshed conditioning
+                model_output = am.model(
+                    hidden_states=sa_embs,
+                    encoder_hidden_states=double_h,
+                    timestep=timesteps_tensor,
+                    vision_features=double_vis_feats,
+                )
+                double_velocity = am.action_decoder(model_output)[:, -am.action_horizon:]
+                v_uncond, v_cond = torch.chunk(double_velocity, 2, dim=0)
+                # Update divergence history with refreshed value
+                delta_v_new = (v_cond - v_uncond).pow(2).mean().item()
+                div_history[-1] = delta_v_new
+
             pred_velocity = v_uncond + current_omega * (v_cond - v_uncond)
 
             # --- Euler update ---
@@ -748,6 +885,12 @@ class TAGFlow(baseframework):
         with torch.autocast("cuda", dtype=torch.float32):
             vis_feats_f = vis_feats.float() if vis_feats is not None else None
 
+            # Build vision context for potential re-vision during denoising
+            vision_ctx = {
+                "images": batch_images,
+                "instructions_cond": instructions_cond,
+            }
+
             if mode == "spatiotemporal":
                 # Core TAG-Flow innovation: spatio-temporal conditioning-level guidance
                 pred_actions = self._predict_action_spatiotemporal(
@@ -759,6 +902,7 @@ class TAGFlow(baseframework):
                     omega_max=o_max,
                     omega_min=o_min,
                     schedule=schedule,
+                    vision_ctx=vision_ctx,
                 )
             elif mode == "scheduled":
                 # Time-scheduled velocity-level CFG (temporal only, uniform across tokens)

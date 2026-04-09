@@ -1,15 +1,15 @@
 
 
-cd /mnt/petrelfs/yejinhui/Projects/starVLA
+cd /data1/guest/starVLA
 export PYTHONPATH=$(pwd):${PYTHONPATH}
 
 port=6678
 gpu_id=2
 # export DEBUG=true
-export star_vla_python=/mnt/petrelfs/share/yejinhui/Envs/miniconda3/envs/starVLA/bin/python
+export star_vla_python=/home/guest/.conda/envs/starVLA/bin/python
 
-your_ckpt=./results/Checkpoints/1208_bridge_rt_1_Qwen3PI/final_model/pytorch_model.pt
-
+your_ckpt=./results/Checkpoints/bridge_rt_1_TAGFlow/checkpoints/steps_50000_pytorch_model.pt
+# /data1/guest/starVLA/results/Checkpoints/bridge_rt_1_TAGFlow/checkpoints/steps_50000_pytorch_model.pt
 #### build output directory #####
 ckpt_dir=$(dirname "${your_ckpt}")
 ckpt_base=$(basename "${your_ckpt}")

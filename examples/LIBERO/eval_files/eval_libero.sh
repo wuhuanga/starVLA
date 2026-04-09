@@ -17,7 +17,8 @@ host="127.0.0.1"
 base_port=5694
 unnorm_key="franka"
 # your_ckpt=./results/LangForce/Checkpoints/tag_flow_libero_all/checkpoints/steps_50000_pytorch_model.pt
-your_ckpt=results/LangForce/Checkpoints/CIGVLA/checkpoints/steps_50000_pytorch_model.pt
+# your_ckpt=results/LangForce/Checkpoints/CIGVLA/checkpoints/steps_50000_pytorch_model.pt
+your_ckpt=results/LangForce/Checkpoints/CIGVLA_libero/checkpoints/steps_50000_pytorch_model.pt
 
 export DEBUG=true
 
@@ -29,10 +30,10 @@ LOG_DIR="logs/$(date +"%Y%m%d_%H%M%S")"
 mkdir -p ${LOG_DIR}
 
 
-# task_suite_name=libero_goal
+task_suite_name=libero_goal
 # task_suite_name=libero_object
 # task_suite_name=libero_spatial
-task_suite_name=libero_10
+# task_suite_name=libero_10
 # task_suite_name=libero_90
 num_trials_per_task=50
 video_out_path="results/${task_suite_name}/${folder_name}"

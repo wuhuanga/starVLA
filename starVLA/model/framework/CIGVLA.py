@@ -86,9 +86,6 @@ class InformationGainTrigger(nn.Module):
             trigger_input = scene_feat
 
         logits = self.net(trigger_input)
-        if self.training:
-            noise = torch.randn_like(logits) * 0.5
-            logits = logits + noise
         return torch.sigmoid(logits)
 
 
@@ -146,7 +143,7 @@ class CIGVLA(baseframework):
             self.vlm_to_action_proj = nn.Identity()
 
         self.future_window = action_cfg.get("future_action_window_size", 7) if isinstance(action_cfg, dict) else getattr(action_cfg, "future_action_window_size", 7)
-        self.entropy_weight = 0.01  # 熵正则：鼓励 g 远离 0/1，保持探索
+        self.gate_loss_weight = 0.1
         self.register_buffer("global_step", torch.tensor(0, dtype=torch.long))
 
     def _extract_action_tokens(self, hidden, input_ids):
@@ -245,23 +242,32 @@ class CIGVLA(baseframework):
             h_fused_rep = h_fused.repeat(repeated_steps, 1, 1)
             state_rep = safe_state.repeat(repeated_steps, 1, 1) if safe_state is not None else None
             
-            # ====== 5. 极简的主 Loss 计算 ======
-            # 直接计算融合特征的 Diffusion Loss，告别方差爆炸
+            # ====== 5. 主 Loss 计算（逐样本，用于门控监督） ======
             B = h_fused.shape[0]
-            losses = []
-            for i in range(B):
-                idx = [i + j * B for j in range(repeated_steps)]
-                loss_i = self.action_header(h_fused_rep[idx], targets_repeated[idx], state_rep[idx] if state_rep is not None else None)
-                losses.append(loss_i)
-            action_loss = torch.stack(losses).mean()
+            h_base_rep = h_base_f32.repeat(repeated_steps, 1, 1)
 
-            # 熵正则：-[g*log(g) + (1-g)*log(1-g)]，鼓励 g 停留在 0.5 附近而非坍塌到 0 或 1
-            g_clamped = g_pred.clamp(1e-6, 1 - 1e-6)
-            gate_entropy = -(g_clamped * g_clamped.log() + (1 - g_clamped) * (1 - g_clamped).log()).mean()
-            total_loss = action_loss - self.entropy_weight * gate_entropy
+            # 主 loss：整 batch 一次前向，GPU 并行
+            action_loss = self.action_header(h_fused_rep, targets_repeated, state_rep)
+
+            # 难度信号：逐样本算 base loss（no_grad，开销小）
+            base_losses = []
+            with torch.no_grad():
+                for i in range(B):
+                    idx = [i + j * B for j in range(repeated_steps)]
+                    state_i = state_rep[idx] if state_rep is not None else None
+                    base_losses.append(self.action_header(h_base_rep[idx], targets_repeated[idx], state_i))
+
+            # ====== 6. 门控监督：base model 越吃力 → g 越大 ======
+            with torch.no_grad():
+                difficulty = torch.stack(base_losses)  # [B]
+                # z-score + sigmoid：温和归一化，不强制极端 0/1
+                g_target = torch.sigmoid((difficulty - difficulty.mean()) / (difficulty.std() + 1e-8))
+
+            gate_loss = F.mse_loss(g_pred.squeeze(-1), g_target)
+            total_loss = action_loss + self.gate_loss_weight * gate_loss
 
             if self.training and self.global_step % 50 == 0:
-                print(f"Step {self.global_step.item()} | Gate Mean: {g_pred.mean().item():.3f} | Action Loss: {action_loss.item():.4f}")
+                print(f"Step {self.global_step.item()} | Gate Mean: {g_pred.mean().item():.3f} | Gate Std: {g_pred.std().item():.3f} | G_target: [{g_target.min().item():.2f}~{g_target.max().item():.2f}] | Action Loss: {action_loss.item():.4f} | Gate Loss: {gate_loss.item():.4f}")
 
         return {
             "action_loss": total_loss,
