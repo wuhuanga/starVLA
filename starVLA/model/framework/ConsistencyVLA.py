@@ -59,6 +59,7 @@ class PerceiverBottleneck(nn.Module):
     def forward(self, raw_context: torch.Tensor) -> torch.Tensor:
         B = raw_context.shape[0]
         q = self.latent_queries.expand(B, -1, -1)
+        raw_context = raw_context.to(q.dtype)
         attn_out, _ = self.cross_attn(query=q, key=raw_context, value=raw_context, need_weights=False)
         h = self.norm1(q + attn_out)
         return self.norm2(h + self.ffn(h))
@@ -84,6 +85,9 @@ class ContinuousRefiner(nn.Module):
     def forward(self, h: torch.Tensor, context: torch.Tensor, step: torch.Tensor) -> torch.Tensor:
         time_emb = self.step_mlp(step).unsqueeze(1)
         h = h + time_emb
+        dtype = self.attn.in_proj_weight.dtype
+        h = h.to(dtype)
+        context = context.to(dtype)
         update, _ = self.attn(query=h, key=context, value=context, need_weights=False)
         h = self.norm1(h + update)
         return self.norm2(h + self.mlp(h))
