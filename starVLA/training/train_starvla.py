@@ -261,9 +261,10 @@ class VLATrainer(TrainerUtils):
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
-                action_loss = output_dict["action_loss"]
+                # Use combined loss if available (e.g. ConsistencyVLA), else action_loss
+                loss = output_dict.get("loss", output_dict["action_loss"])
 
-            self.accelerator.backward(action_loss)
+            self.accelerator.backward(loss)
 
             if self.config.trainer.gradient_clipping is not None:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
@@ -271,7 +272,15 @@ class VLATrainer(TrainerUtils):
             self.optimizer.step()
             self.lr_scheduler.step()
 
-        return {"action_dit_loss": action_loss.item()}
+            # EMA update for self-distillation frameworks (e.g. ConsistencyVLA)
+            unwrapped = self.accelerator.unwrap_model(self.model)
+            if hasattr(unwrapped, "update_ema"):
+                unwrapped.update_ema()
+
+        metrics = {"action_dit_loss": output_dict["action_loss"].item()}
+        if "cd_loss" in output_dict:
+            metrics["cd_loss"] = output_dict["cd_loss"].item()
+        return metrics
 
     def eval_action_model(self, step_metrics: dict | None = None):
         step_metrics = step_metrics or {}

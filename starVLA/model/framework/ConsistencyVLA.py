@@ -94,8 +94,8 @@ class ContinuousRefiner(nn.Module):
 # ==============================================================================
 @FRAMEWORK_REGISTRY.register("ConsistencyVLA")
 class ConsistencyVLA(baseframework):
-    def __init__(self, config: PretrainedConfig, **kwargs):
-        super().__init__(config)
+    def __init__(self, config=None, **kwargs):
+        super().__init__()
         self.config = config
 
         self.qwen_vl_interface = get_vlm_model(config=self.config)
