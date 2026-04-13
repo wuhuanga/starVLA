@@ -31,7 +31,7 @@ cp $0 ${output_dir}/
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 8 \
+  --num_processes 2 \
   --main_process_port 29501 \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
@@ -47,6 +47,6 @@ accelerate launch \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
-  --wandb_project starVLA_ConsistencyVLA_rs \
+  --wandb_project starVLA_ConsistencyVLA_nanda \
   --wandb_entity haodong_chen-nanjing-university-of-aeronautics-and-astro \
   # --is_debug True

@@ -251,17 +251,18 @@ class ConsistencyVLA(baseframework):
             outputs = self.qwen_vl_interface(
                 **qwen_inputs, output_hidden_states=True, return_dict=True, use_cache=False
             )
-            raw_context = outputs.hidden_states[-1].to(torch.float32)
+            raw_context = outputs.hidden_states[-1]
 
-        h0 = self._extract_h0_from_vlm(raw_context, qwen_inputs["input_ids"])
-        context_reduced = self.context_bottleneck(raw_context)
+            h0 = self._extract_h0_from_vlm(raw_context, qwen_inputs["input_ids"])
+            context_reduced = self.context_bottleneck(raw_context)
 
-        inference_steps = kwargs.get("inference_steps", self.max_steps)
-        h_final = self._rollout(self.teacher_refiner, h0, context_reduced,
-                                start_step=1, steps=inference_steps)
+            inference_steps = kwargs.get("inference_steps", self.max_steps)
+            h_final = self._rollout(self.teacher_refiner, h0, context_reduced,
+                                    start_step=1, steps=inference_steps)
 
-        pred_actions = self.action_head(h_final.mean(dim=1))
-        pred_actions = pred_actions.reshape(len(examples), self.chunk_len, self.action_dim)
+            pred_actions = self.action_head(h_final.mean(dim=1))
+
+        pred_actions = pred_actions.float().reshape(len(examples), self.chunk_len, self.action_dim)
         return {"normalized_actions": pred_actions.cpu().numpy()}
 
     def _get_ema_decay(self) -> float:

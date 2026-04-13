@@ -55,7 +55,13 @@ framework:
 
   # Condition Dropout: probability of dropping language instruction during training
   # (replaces BayesianCAG's dual-branch architecture with single forward + dropout)
-  cond_drop_rate: 0.15
+  cond_drop_rate: 0.20
+
+  # Vision-Language Grounding Loss (training)
+  # Encourages action tokens to attend to language-grounded visual regions
+  grounding_loss_weight: 0.1
+  # Vision-Grounded Spatial Omega (inference)
+  vision_omega_weight: 0.3
 
   # Spatio-Temporal Guidance (inference only)
   # "spatiotemporal" mode (recommended):

@@ -118,6 +118,9 @@ class TAGFlow(baseframework):
         # ===== Vision-Grounded Spatial Omega =====
         self.vision_omega_weight = float(self.config.framework.get("vision_omega_weight", 0.3))
 
+        # ===== Vision-Language Grounding Loss (training) =====
+        self.grounding_loss_weight = float(self.config.framework.get("grounding_loss_weight", 0.1))
+
         # ===== Vision cross-attention injection in DiT =====
         self.enable_vision_cross_attn = bool(
             self.config.framework.action_model.get("enable_vision_cross_attn", False)
@@ -136,7 +139,8 @@ class TAGFlow(baseframework):
             f"omega_base={self.omega_base}, schedule={self.omega_schedule}, "
             f"guidance_mode={self.guidance_mode}, "
             f"vision_cross_attn={self.enable_vision_cross_attn}, "
-            f"vision_omega_weight={self.vision_omega_weight}"
+            f"vision_omega_weight={self.vision_omega_weight}, "
+            f"grounding_loss_weight={self.grounding_loss_weight}"
         )
 
     # ------------------------------------------------------------------
@@ -440,6 +444,66 @@ class TAGFlow(baseframework):
         return torch.stack(omega_vecs, dim=0).unsqueeze(-1)  # [B, K, 1]
 
     # ------------------------------------------------------------------
+    # Vision-Language Grounding Loss
+    # ------------------------------------------------------------------
+    def _compute_grounding_loss(
+        self,
+        attn_avg: torch.Tensor,     # [B, S, S]  head-averaged attention
+        input_ids: torch.Tensor,     # [B, S]
+        action_starts: torch.Tensor, # [B]
+    ) -> torch.Tensor:
+        """
+        Auxiliary loss that encourages action tokens to attend to the visual
+        regions that language tokens also attend to (implicit grounding).
+
+        For each sample:
+          1. Compute vis_importance = softmax(sum(lang→vision attention))
+             → which vision patches does the instruction point to?
+          2. Compute action_vis_attn = action→vision attention per query
+          3. Loss = -mean(log(sum(action_vis_attn * vis_importance)))
+             → maximize action attention on language-grounded patches.
+
+        Samples without valid vision or language ranges are skipped.
+        """
+        B = input_ids.shape[0]
+        K = self.num_latent_action_query
+        losses = []
+
+        for b in range(B):
+            ids = input_ids[b]
+            a_start = int(action_starts[b].item())
+            action_range = slice(a_start, a_start + K)
+
+            v_start = self._find_first_pos(ids, VISION_START_TOKEN_INDEX)
+            v_end = self._find_last_pos(ids, VISION_END_TOKEN_INDEX)
+
+            # Need valid vision range and language range
+            if v_start == -1 or v_end == -1 or v_end <= v_start:
+                continue
+            if v_end + 1 >= a_start:
+                continue
+
+            vis_range = slice(v_start, v_end + 1)
+            lang_range = slice(v_end + 1, a_start)
+
+            # Vision importance from language attention (implicit grounding)
+            lang_to_vis = attn_avg[b, lang_range, vis_range]     # [N_lang, N_vis]
+            vis_importance = lang_to_vis.sum(dim=0)               # [N_vis]
+            vis_importance = F.softmax(vis_importance, dim=0)      # normalized
+
+            # Action → vision attention weighted by grounding
+            attn_vis = attn_avg[b, action_range, vis_range]       # [K, N_vis]
+            grounded_attn = (attn_vis * vis_importance.unsqueeze(0)).sum(dim=-1)  # [K]
+
+            # Negative log-likelihood: maximize grounded attention
+            loss_b = -torch.log(grounded_attn + 1e-8).mean()
+            losses.append(loss_b)
+
+        if len(losses) == 0:
+            return torch.tensor(0.0, device=input_ids.device)
+        return torch.stack(losses).mean()
+
+    # ------------------------------------------------------------------
     # Training forward: 大道至简 (pure flow matching + condition dropout)
     # ------------------------------------------------------------------
     def forward(
@@ -459,22 +523,34 @@ class TAGFlow(baseframework):
         state = [example["state"] for example in examples] if "state" in examples[0] else None
 
         B = len(examples)
+        use_grounding = self.grounding_loss_weight > 0
 
         # ===== Condition Dropout: single-branch design =====
         instructions = []
+        cond_mask = []  # True if sample has language (for grounding loss)
         for i in range(B):
             if random.random() < self.cond_drop_rate:
-                # Unconditional: action tokens only (no language, pure visual prior)
                 instructions.append(self.latent_action_query)
+                cond_mask.append(False)
             else:
-                # Conditional: lang + action tokens (posterior: V + L + A)
                 instructions.append(batch_langs[i] + self.latent_action_query)
+                cond_mask.append(True)
 
-        # ===== Single VLM Forward Pass (显存省一半，速度翻倍) =====
+        # ===== Single VLM Forward Pass =====
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images,
             instructions=instructions,
         )
+
+        # Capture attention for grounding loss (only for cond samples)
+        need_attn = use_grounding and any(cond_mask)
+        hook_handle, hook_captured = None, {}
+        if need_attn:
+            hook_handle, hook_captured = self._capture_last_layer_attn_weights(
+                qwen_inputs.get("input_ids"),
+                qwen_inputs.get("attention_mask"),
+            )
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -483,12 +559,35 @@ class TAGFlow(baseframework):
                 return_dict=True,
                 use_cache=False,
             )
+
+            if hook_handle is not None:
+                hook_handle.remove()
+
             last_hidden = qwenvl_outputs.hidden_states[-1]
-            action_hidden = self._extract_action_query_hidden_states(
+            tokenizer = self.qwen_vl_interface.processor.tokenizer
+            action_hidden, action_starts = self._extract_action_query_hidden_states(
                 last_hidden,
                 qwen_inputs["input_ids"],
-                self.qwen_vl_interface.processor.tokenizer,
-            )  # [B, K, H]
+                tokenizer,
+                return_starts=True,
+            )  # [B, K, H], [B]
+
+        # ===== Vision-Language Grounding Loss =====
+        grounding_loss = torch.tensor(0.0, device=action_hidden.device)
+        if need_attn and "attn" in hook_captured:
+            # Only compute grounding loss for conditioned samples (with language)
+            cond_indices = [i for i, m in enumerate(cond_mask) if m]
+            if len(cond_indices) > 0:
+                cond_idx_t = torch.tensor(cond_indices, device=action_hidden.device)
+                attn_weights = hook_captured["attn"]          # [B, num_heads, S, S]
+                attn_avg = attn_weights.mean(dim=1)            # [B, S, S]
+                # Select only conditioned samples
+                attn_avg_cond = attn_avg[cond_idx_t]
+                input_ids_cond = qwen_inputs["input_ids"][cond_idx_t]
+                action_starts_cond = action_starts[cond_idx_t]
+                grounding_loss = self._compute_grounding_loss(
+                    attn_avg_cond, input_ids_cond, action_starts_cond,
+                )
 
         # ===== Action head: pure flow matching loss =====
         with torch.autocast("cuda", dtype=torch.float32):
@@ -524,9 +623,13 @@ class TAGFlow(baseframework):
                 vision_features=vis_feats_repeated,
             )
 
+        # ===== Total loss =====
+        total_loss = flow_loss + self.grounding_loss_weight * grounding_loss
+
         return {
-            "action_loss": flow_loss,
+            "action_loss": total_loss,
             "flow_loss": flow_loss.detach(),
+            "grounding_loss": grounding_loss.detach(),
         }
 
     # ------------------------------------------------------------------
