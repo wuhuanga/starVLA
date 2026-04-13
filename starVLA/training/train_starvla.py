@@ -236,6 +236,7 @@ class VLATrainer(TrainerUtils):
         metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
         if hasattr(self.vla_train_dataloader, "__len__") and len(self.vla_train_dataloader):
             metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+        metrics["build_tag"] = 20260410
 
         wandb.log(metrics, step=self.completed_steps)
         logger.info(f"Step {self.completed_steps}, Metrics: {metrics}")
