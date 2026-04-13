@@ -266,7 +266,7 @@ class ConsistencyVLA(baseframework):
 
             pred_actions = self.action_head(h_final.mean(dim=1))
         pred_actions = pred_actions.reshape(len(examples), self.chunk_len, self.action_dim)
-        return {"normalized_actions": pred_actions.cpu().numpy()}
+        return {"normalized_actions": pred_actions.float().cpu().numpy()}
 
     def _get_ema_decay(self) -> float:
         """EMA decay with linear rampup: 初期快速跟上 student，后期稳定。"""
