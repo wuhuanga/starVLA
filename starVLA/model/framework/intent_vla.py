@@ -16,7 +16,9 @@
 #   (6) VLM backbone is trainable (expected via LoRA externally). No detach on h0.
 
 import copy
+import json
 import random
+from pathlib import Path
 from typing import List, Optional, Dict
 
 import numpy as np
@@ -76,7 +78,32 @@ class ParaphraseBank:
     Populated offline. If an instruction is not in the bank, return the original.
     """
     def __init__(self, bank: Optional[Dict[str, List[str]]] = None):
-        self.bank = bank or {}
+        self.bank = self._load_bank(bank)
+
+    @staticmethod
+    def _load_bank(bank) -> Dict[str, List[str]]:
+        if bank is None or bank == "":
+            return {}
+        if isinstance(bank, dict):
+            return bank
+        if isinstance(bank, str):
+            bank_path = Path(bank).expanduser()
+            if not bank_path.exists():
+                raise FileNotFoundError(f"Paraphrase bank path does not exist: {bank_path}")
+            try:
+                with bank_path.open("r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception as exc:
+                raise ValueError(f"Failed to load paraphrase bank from {bank_path}: {exc}") from exc
+            if isinstance(loaded, dict):
+                return loaded
+            raise ValueError(
+                f"Paraphrase bank at {bank_path} must be a JSON object, got {type(loaded).__name__}."
+            )
+        raise TypeError(
+            f"Unsupported paraphrase_bank type {type(bank).__name__}. "
+            "Expected None, empty string, dict, or a JSON file path."
+        )
 
     def sample(self, instruction: str) -> str:
         candidates = self.bank.get(instruction.strip(), None)
