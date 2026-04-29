@@ -108,7 +108,7 @@ class IntentVLA(baseframework):
         super().__init__()
         self.config = config
 
-        # ----- VLM (Student). Expected to be wrapped with LoRA by the caller. -----
+        # ----- VLM (Student). This path stays trainable. -----
         self.qwen_vl_interface = get_vlm_model(config=self.config)
         self.hidden_dim = self.qwen_vl_interface.model.config.hidden_size
 
@@ -143,10 +143,13 @@ class IntentVLA(baseframework):
         # ----- EMA teacher (deep copy of student VLM; params only, no grad) -----
         # NOTE: this doubles VLM parameter memory. For very large backbones,
         # consider EMA over the LoRA deltas only; left as future work.
-        self.teacher_vlm = copy.deepcopy(self.qwen_vl_interface)
-        for p in self.teacher_vlm.parameters():
+        teacher_vlm = copy.deepcopy(self.qwen_vl_interface)
+        for p in teacher_vlm.parameters():
             p.requires_grad_(False)
-        self.teacher_vlm.eval()
+        teacher_vlm.eval()
+        # Keep EMA teacher out of nn.Module registration so optimizer/DeepSpeed
+        # only sees student parameters.
+        object.__setattr__(self, "_teacher_vlm", teacher_vlm)
 
         self.ema_decay_init = float(fw.get("ema_decay_init", 0.99))
         self.ema_decay_final = float(fw.get("ema_decay_final", 0.9995))
@@ -158,6 +161,22 @@ class IntentVLA(baseframework):
         paraphrase_bank = fw.get("paraphrase_bank", None)
         self.paraphrase = ParaphraseBank(paraphrase_bank)
         self.p_paraphrase = float(fw.get("p_paraphrase", 0.5))
+
+    @property
+    def teacher_vlm(self):
+        return self._teacher_vlm
+
+    def _sync_teacher_device_dtype(self):
+        """Move the unregistered EMA teacher alongside the student on demand."""
+        student_model = self.qwen_vl_interface.model
+        teacher_model = self.teacher_vlm.model
+        student_param = next(student_model.parameters(), None)
+        teacher_param = next(teacher_model.parameters(), None)
+        if student_param is None or teacher_param is None:
+            return
+        if teacher_param.device != student_param.device or teacher_param.dtype != student_param.dtype:
+            self.teacher_vlm.to(device=student_param.device, dtype=student_param.dtype)
+            self.teacher_vlm.eval()
 
     # ------------------------------------------------------------------ helpers
     def _ensure_action_token_ids(self, tokenizer):
@@ -257,6 +276,7 @@ class IntentVLA(baseframework):
         ]
 
         # ============== Teacher forward (EMA VLM, no grad) ==============
+        self._sync_teacher_device_dtype()
         with torch.no_grad():
             teacher_inputs = self.teacher_vlm.build_qwenvl_inputs(
                 batch_images_raw, instructions_teacher
@@ -339,6 +359,7 @@ class IntentVLA(baseframework):
     @torch.no_grad()
     def update_ema(self):
         """Call once per optimizer step, AFTER student weights are updated."""
+        self._sync_teacher_device_dtype()
         d = self._current_ema_decay()
         s_params = dict(self.qwen_vl_interface.named_parameters())
         for name, t_param in self.teacher_vlm.named_parameters():
