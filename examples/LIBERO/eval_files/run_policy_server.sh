@@ -4,11 +4,11 @@ export star_vla_python=/home/guest/.conda/envs/starVLA/bin/python
 
 # your_ckpt=results/LangForce/Checkpoints/tag_flow_libero_all/checkpoints/steps_50000_pytorch_model.pt
 # your_ckpt=results/LangForce/Checkpoints/CIGVLA/checkpoints/steps_50000_pytorch_model.pt
-your_ckpt=results/LangForce/Checkpoints/CIGVLA_libero/checkpoints/steps_50000_pytorch_model.pt
+# your_ckpt=results/LangForce/Checkpoints/CIGVLA_libero/checkpoints/steps_50000_pytorch_model.pt
+your_ckpt=results/ConsistencyVLA/Checkpoints/consistency_vla_libero_all/checkpoints/steps_50000_pytorch_model.pt
 
 
-
-gpu_id=7
+gpu_id=3
 port=5694
 ################# star Policy Server ######################
 

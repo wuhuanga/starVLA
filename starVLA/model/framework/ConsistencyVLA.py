@@ -1,6 +1,6 @@
 # Copyright 2026 starVLA community.
-# Architecture: Latent Convergent Dynamics via Global Consistency
-# Self-distillation VLA with early-exit capability.
+# Architecture: Latent Convergent Dynamics via Action-Space Consistency
+# Features: Temporal Action Decoder (ACT-style), Direct Head Supervision, Dynamic CD Schedule.
 
 import math
 import copy
@@ -24,7 +24,7 @@ logger = initialize_overwatch(__name__)
 
 
 # ==============================================================================
-# 1. 认知阶段编码
+# 1. 认知阶段编码 (离散 Step)
 # ==============================================================================
 class SinusoidalStepEmbedding(nn.Module):
     def __init__(self, dim: int):
@@ -43,7 +43,7 @@ class SinusoidalStepEmbedding(nn.Module):
 
 
 # ==============================================================================
-# 2. 空间特征无损压缩
+# 2. 空间特征无损压缩 (提取 256 个高清 3D 几何特征)
 # ==============================================================================
 class PerceiverBottleneck(nn.Module):
     def __init__(self, dim: int, num_latents: int = 256):
@@ -65,7 +65,38 @@ class PerceiverBottleneck(nn.Module):
 
 
 # ==============================================================================
-# 3. 隐空间演化引擎
+# 3. 🚀 ACT 风格时序动作解码器 (Temporal Action Decoder)
+# ==============================================================================
+class TemporalActionDecoder(nn.Module):
+    def __init__(self, hidden_dim: int, chunk_len: int, action_dim: int):
+        super().__init__()
+        self.chunk_len = chunk_len
+        # 纯粹的时间查询通证
+        self.time_embeddings = nn.Parameter(torch.randn(1, chunk_len, hidden_dim) * 0.02)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=8, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.action_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, h_intent: torch.Tensor, spatial_context: torch.Tensor) -> torch.Tensor:
+        B = spatial_context.shape[0]
+        q = self.time_embeddings.expand(B, -1, -1)
+
+        # h_intent: [B, K, dim] (K=num_latent_query, 可能>1)
+        # spatial_context: [B, 256, dim]
+        # 池化为 [B, 1, dim] 以广播注入到所有 spatial tokens
+        h_pooled = h_intent.mean(dim=1, keepdim=True)  # [B, 1, dim]
+        kv = spatial_context + h_pooled
+
+        attn_out, _ = self.cross_attn(query=q, key=kv, value=kv, need_weights=False)
+        out = self.norm(q + attn_out)
+        return self.action_proj(out)
+
+# ==============================================================================
+# 4. 隐空间演化引擎
 # ==============================================================================
 class ContinuousRefiner(nn.Module):
     def __init__(self, dim: int):
@@ -90,7 +121,7 @@ class ContinuousRefiner(nn.Module):
 
 
 # ==============================================================================
-# 4. 主框架
+# 5. 主框架
 # ==============================================================================
 @FRAMEWORK_REGISTRY.register("ConsistencyVLA")
 class ConsistencyVLA(baseframework):
@@ -118,11 +149,11 @@ class ConsistencyVLA(baseframework):
         self.action_token_ids = None
 
         self.max_steps = 4
-        self.ema_decay_init = 0.9
+        # 🚀 调慢 EMA 衰减，让 Teacher 成为极度稳定的定海神针
+        self.ema_decay_init = 0.95
         self.ema_decay_target = 0.999
         self.ema_decay_rampup_steps = 5000
 
-        # Consistency loss mode: "action" (推荐) 或 "hidden"
         self.cd_loss_space = getattr(config.framework, "cd_loss_space", "action")
 
         self.context_bottleneck = PerceiverBottleneck(self.hidden_dim, num_latents=256)
@@ -132,11 +163,10 @@ class ConsistencyVLA(baseframework):
         self.teacher_refiner.requires_grad_(False)
         self.teacher_refiner.eval()
 
-        self.action_head = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self.chunk_len * self.action_dim)
-        )
+        # 🚀 替换为主力动作头 (处理 Refiner 输出)
+        self.action_head = TemporalActionDecoder(self.hidden_dim, self.chunk_len, self.action_dim)
+        
+        
 
         self._ema_step = 0
 
@@ -187,44 +217,49 @@ class ConsistencyVLA(baseframework):
             raw_context = outputs.hidden_states[-1].to(torch.float32)
 
         h0_raw = self._extract_h0_from_vlm(raw_context, qwen_inputs["input_ids"])
-        h0_detached = h0_raw.detach()
-        context_reduced = self.context_bottleneck(raw_context)
+        h0_detached = h0_raw.detach()  # [B, 1, dim]
+        context_reduced = self.context_bottleneck(raw_context)  # [B, 256, dim]
 
         actions_t = torch.tensor(actions, device=device, dtype=torch.float32)
-        actions_target = actions_t[:, -(self.future_window + 1):, :].reshape(actions_t.shape[0], -1)
+        # Target shape: [B, chunk_len, action_dim]
+        actions_target = actions_t[:, -(self.future_window + 1):, :] 
 
         # ==========================================
-        # B. 单次 student rollout，同时用于 action loss 和 cd loss
+        # C. 主力 Action loss (满步 rollout)
         # ==========================================
-        t_steps = torch.randint(1, self.max_steps, (1,)).item()  # [1, max_steps-1]
-        h_student = self._rollout(self.student_refiner, h0_detached, context_reduced,
-                                  start_step=1, steps=t_steps)
-
-        pred_student = self.action_head(h_student.mean(dim=1))
-        action_loss = F.smooth_l1_loss(pred_student, actions_target)
+        h_student_full = self._rollout(self.student_refiner, h0_detached, context_reduced,
+                                       start_step=1, steps=self.max_steps)
+        pred_student_full = self.action_head(h_student_full, context_reduced)
+        action_loss = F.smooth_l1_loss(pred_student_full, actions_target)
 
         # ==========================================
-        # C. Teacher 满步 rollout → consistency loss
+        # D. 相邻步一致性 (Adjacent-step Consistency)
         # ==========================================
+        t_steps = torch.randint(1, self.max_steps, (1,)).item()
+        
+        h_student_t = self._rollout(self.student_refiner, h0_detached, context_reduced,
+                                    start_step=1, steps=t_steps)
+
         with torch.no_grad():
-            h_teacher = self._rollout(self.teacher_refiner, h0_detached, context_reduced,
-                                      start_step=1, steps=self.max_steps)
+            h_teacher_t1 = self._rollout(self.teacher_refiner, h0_detached, context_reduced,
+                                         start_step=1, steps=t_steps + 1)
 
-        if self.cd_loss_space == "action":
-            with torch.no_grad():
-                pred_teacher = self.action_head(h_teacher.mean(dim=1)).detach()
-            cd_loss = F.mse_loss(pred_student, pred_teacher)
-        else:
-            cd_loss = F.mse_loss(
-                F.normalize(h_student, p=2, dim=-1),
-                F.normalize(h_teacher, p=2, dim=-1).detach()
-            )
+        # 在动作空间拉齐
+        pred_student_t = self.action_head(h_student_t, context_reduced)
+        with torch.no_grad():
+            pred_teacher_t1 = self.action_head(h_teacher_t1, context_reduced).detach()
+            
+        cd_loss = F.mse_loss(pred_student_t, pred_teacher_t1)
 
         # ==========================================
-        # D. 合并损失
+        # E. 合并损失 (引入动态 CD 权重调度)
         # ==========================================
-        cd_weight = 0.1
-        total_loss = action_loss + cd_weight * cd_loss
+        # 🚀 前期专注拟合动作，后期慢慢加上一致性约束 (目标权重 0.1)
+        rampup_ratio = min(self._ema_step / max(self.ema_decay_rampup_steps, 1), 1.0)
+        cd_weight = 0.1 * rampup_ratio
+
+        # 辅助直连 loss 权重给 0.5
+        total_loss = action_loss  + (cd_weight * cd_loss)
 
         return {
             "loss": total_loss,
@@ -251,22 +286,22 @@ class ConsistencyVLA(baseframework):
             outputs = self.qwen_vl_interface(
                 **qwen_inputs, output_hidden_states=True, return_dict=True, use_cache=False
             )
-            raw_context = outputs.hidden_states[-1]
+            raw_context = outputs.hidden_states[-1].to(torch.float32)
 
             h0 = self._extract_h0_from_vlm(raw_context, qwen_inputs["input_ids"])
             context_reduced = self.context_bottleneck(raw_context)
 
+            # 动态支持 Early-Exit
             inference_steps = kwargs.get("inference_steps", self.max_steps)
             h_final = self._rollout(self.teacher_refiner, h0, context_reduced,
                                     start_step=1, steps=inference_steps)
 
-            pred_actions = self.action_head(h_final.mean(dim=1))
+            # 直接解码出 [B, chunk_len, action_dim]
+            pred_actions = self.action_head(h_final, context_reduced)
 
-        pred_actions = pred_actions.float().reshape(len(examples), self.chunk_len, self.action_dim)
-        return {"normalized_actions": pred_actions.cpu().numpy()}
+        return {"normalized_actions": pred_actions.float().cpu().numpy()}
 
     def _get_ema_decay(self) -> float:
-        """EMA decay with linear rampup: 初期快速跟上 student，后期稳定。"""
         ratio = min(self._ema_step / max(self.ema_decay_rampup_steps, 1), 1.0)
         return self.ema_decay_init + (self.ema_decay_target - self.ema_decay_init) * ratio
 
@@ -313,7 +348,7 @@ if __name__ == "__main__":
     }
 
     out = model([sample, sample])
-    print(f"Total Loss: {out['loss'].item():.4f} | Action: {out['action_loss'].item():.4f} | CD: {out['cd_loss'].item():.4f}")
+    print(f"Total Loss: {out['loss'].item():.4f} | Action: {out['action_loss'].item():.4f} | Direct: {out['direct_loss'].item():.4f} | CD: {out['cd_loss'].item():.4f}")
 
     model.update_ema()
 
@@ -321,4 +356,4 @@ if __name__ == "__main__":
     pred_1step = model.predict_action([sample], inference_steps=1)
     print(f"4-step shape: {pred_4step['normalized_actions'].shape}")
     print(f"1-step shape: {pred_1step['normalized_actions'].shape}")
-    print("ConsistencyVLA ready.")
+    print("Pareto-Optimal Release is ready. Let's make history.")

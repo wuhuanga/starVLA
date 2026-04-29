@@ -54,16 +54,16 @@ accelerate launch \
   --framework.qwenvl.base_vlm ${base_vlm} \
   --datasets.vla_data.data_root_dir ${libero_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 8 \
+  --datasets.vla_data.per_device_batch_size 4 \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.max_train_steps 50000 \
-  --trainer.save_interval 10000 \
+  --trainer.save_interval 50000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
-  --wandb_project starVLA_Libero_LangForce \
+  --wandb_project starVLA_Libero_CigVLA \
   --wandb_entity haodong_chen-nanjing-university-of-aeronautics-and-astro \
   --is_debug False
 

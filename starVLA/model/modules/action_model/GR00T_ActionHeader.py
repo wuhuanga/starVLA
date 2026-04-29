@@ -275,42 +275,34 @@ class FlowmatchingActionHead(nn.Module):
         return BatchFeature(data=batch)
 
 
-    def forward(self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None, encoder_attention_mask=None, vision_features: torch.Tensor = None):
+    def forward(self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None,
+                encoder_attention_mask=None, reduction: str = "mean"):
         """
         vl_embs: shape (B, seq_length, feature_dim)
         actions: shape (B, future_action_window_size, D_action)
-        vision_features: shape (B, N_vis, H_vlm) — raw visual feature map (optional)
+        reduction: 'mean' (default, scalar loss for backward) or 'none' (per-sample loss [B])
         """
         device = vl_embs.device
-
         # Embed noised action trajectory.
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
-
         noisy_trajectory = (1 - t) * noise + t * actions
         velocity = actions - noise
-
         # Convert (continuous) t -> discrete if needed
         t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
         action_features = self.action_encoder(noisy_trajectory, t_discretized)
-
-
         # embed state
         state_features = self.state_encoder(state) if state is not None else None
-
-
         # Maybe add position embedding.
         if self.config.add_pos_embed:
             pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
-
         # state and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
         sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1) \
             if state_features is not None else torch.cat((future_tokens, action_features), dim=1)
-
         # Join VLM features with state and action embedding along sequence dimension.
         model_output = self.model(
             hidden_states=sa_embs,
@@ -318,14 +310,23 @@ class FlowmatchingActionHead(nn.Module):
             encoder_attention_mask=encoder_attention_mask,
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
-            vision_features=vision_features,
         )
         pred = self.action_decoder(model_output)
-        pred_actions = pred[:, -actions.shape[1] :]
-
-        # Slice out only the action portion of pred and target.
-        loss = ((pred_actions - velocity) ** 2).mean()
-        return loss
+        pred_actions = pred[:, -actions.shape[1]:]
+    
+        # ====== Loss with reduction support ======
+        # 原代码: loss = ((pred_actions - velocity) ** 2).mean()
+        # 改动:  保留 mean 作为 default 行为不变；新增 'none' 返回 per-sample [B]
+        sq_err = (pred_actions - velocity) ** 2  # [B, T, D]
+        if reduction == "mean":
+            return sq_err.mean()
+        elif reduction == "none":
+            # 在 T 和 D 维度上 mean，保留 batch 维度
+            return sq_err.mean(dim=tuple(range(1, sq_err.dim())))  # [B]
+        elif reduction == "sum":
+            return sq_err.sum()
+        else:
+            raise ValueError(f"Unknown reduction: {reduction}. Use 'mean' / 'none' / 'sum'.")
 
     @torch.no_grad()
     def predict_action(self, vl_embs: torch.Tensor, state: torch.Tensor = None, vision_features: torch.Tensor = None) -> torch.Tensor:
