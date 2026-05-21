@@ -33,7 +33,7 @@ if __name__ == "__main__":
         port=args.port,
         action_scale=args.action_scale,
         cfg_scale=1.5,                  # cfg from 1.5 to 7 also performs well
-        apply_visual_aug=args.apply_visual_aug,
+        use_aug=args.use_aug,
         p_visual_aug=args.p_visual_aug,
     )
 

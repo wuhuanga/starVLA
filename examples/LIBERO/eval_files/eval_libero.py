@@ -16,12 +16,19 @@ import tqdm
 import tyro
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import random
+
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+from starVLA.model.framework.intent_vla import RoboSafeAugment, ParaphraseBank
+from PIL import Image as PILImage
 
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
     arr = np.asarray(open_val, dtype=np.float32).reshape(-1)
     v = float(arr[0])
@@ -33,12 +40,14 @@ def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
 class Args:
     host: str = "127.0.0.1"
     port: int = 10093
-    resize_size = [224,224]
+    resize_size = [224, 224]
 
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    task_suite_name: str = (
+        "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
 
@@ -49,6 +58,11 @@ class Args:
 
     seed: int = 7  # Random Seed (for reproducibility)
 
+    use_aug: bool = False  # ablation: apply RoboSafeAugment to eval images
+
+    paraphrase_bank: str = ""  # path to JSON paraphrase bank; empty = no paraphrase
+    p_paraphrase: float = 1.0  # probability to apply paraphrase per episode
+
     pretrained_path: str = ""
 
     post_process_action: bool = True
@@ -56,8 +70,8 @@ class Args:
     job_name: str = "test"
 
     # BayesianCAG guidance parameters (ignored by non-BayesianCAG models)
-    omega: float = 0.0           # CAG guidance scale. 0.0 = use model default from config
-    guidance_mode: str = ""      # "latent", "action" or "velocity". "" = use model default
+    omega: float = 0.0  # CAG guidance scale. 0.0 = use model default from config
+    guidance_mode: str = ""  # "latent", "action" or "velocity". "" = use model default
 
 
 def eval_libero(args: Args) -> None:
@@ -73,7 +87,7 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Task suite: {args.task_suite_name}")
 
     # args.video_out_path = f"{date_base}+{args.job_name}"
-    
+
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
@@ -89,15 +103,22 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
+    augmentor = RoboSafeAugment() if args.use_aug else None
+    logging.info(f"[Augmentation] visual_aug={'ON' if augmentor is not None else 'OFF'}")
+    paraphrase = ParaphraseBank(args.paraphrase_bank) if args.paraphrase_bank else None
+    if paraphrase is not None:
+        logging.info(f"[Paraphrase] bank loaded: {len(paraphrase.bank)} instructions, p_paraphrase={args.p_paraphrase}")
+    else:
+        logging.info("[Paraphrase] disabled")
+
     client_model = ModelClient(
-        policy_ckpt_path=args.pretrained_path, # to get unnormalization stats
+        policy_ckpt_path=args.pretrained_path,  # to get unnormalization stats
         host=args.host,
         port=args.port,
         image_size=args.resize_size,
         omega=args.omega,
         guidance_mode=args.guidance_mode,
     )
-
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -116,8 +137,18 @@ def eval_libero(args: Args) -> None:
         for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
             logging.info(f"\nTask: {task_description}")
 
+            # Sample paraphrase once per episode (consistent instruction throughout rollout)
+            if paraphrase is not None and random.random() < args.p_paraphrase:
+                instruction = paraphrase.sample(task_description)
+            else:
+                instruction = task_description
+            logging.info(
+                f'[Episode {episode_idx}] original: "{task_description}" | '
+                f'used: "{instruction}" | paraphrased={instruction != task_description}'
+            )
+
             # Reset environment
-            client_model.reset(task_description=task_description)  # Reset the client connection
+            client_model.reset(task_description=instruction)  # Reset the client connection
             env.reset()
 
             # Set initial states
@@ -130,9 +161,9 @@ def eval_libero(args: Args) -> None:
 
             logging.info(f"Starting episode {task_episodes + 1}...")
             step = 0
-            
+
             # full_actions = np.load("./debug/action.npy")
-            
+
             while t < max_steps + args.num_steps_wait:
                 # try:
                 # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
@@ -144,9 +175,11 @@ def eval_libero(args: Args) -> None:
 
                 # IMPORTANT: rotate 180 degrees to match train preprocessing
                 img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                wrist_img = np.ascontiguousarray(
-                    obs["robot0_eye_in_hand_image"][::-1, ::-1]
-                )
+                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+
+                if augmentor is not None:
+                    img = np.array(augmentor(PILImage.fromarray(img)))
+                    wrist_img = np.array(augmentor(PILImage.fromarray(wrist_img)))
 
                 # Save preprocessed image for replay video
                 replay_images.append(img)
@@ -159,15 +192,11 @@ def eval_libero(args: Args) -> None:
                     )
                 )
 
-                observation = { # 
-                    "observation.primary": np.expand_dims(
-                        img, axis=0
-                    ),  # (H, W, C), dtype=unit8, range(0-255)
-                    "observation.wrist_image": np.expand_dims(
-                        wrist_img, axis=0
-                    ),  # (H, W, C)
+                observation = {  #
+                    "observation.primary": np.expand_dims(img, axis=0),  # (H, W, C), dtype=unit8, range(0-255)
+                    "observation.wrist_image": np.expand_dims(wrist_img, axis=0),  # (H, W, C)
                     "observation.state": np.expand_dims(state, axis=0),
-                    "instruction": [str(task_description)],
+                    "instruction": [instruction],
                 }
 
                 # align key with model API --> 这里给了两个图像 --> check training
@@ -176,26 +205,27 @@ def eval_libero(args: Args) -> None:
                     "lang": observation["instruction"][0],
                 }
 
-                
                 start_time = time.time()
-                
-                response = client_model.step(example=example_dict, step=step) 
-                
+
+                response = client_model.step(example=example_dict, step=step)
+
                 end_time = time.time()
                 # print(f"time: {end_time - start_time}")
-                
-                # # 
+
+                # #
                 raw_action = response["raw_action"]
-                
+
                 world_vector_delta = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
                 rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
                 open_gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
                 gripper = _binarize_gripper_open(open_gripper)
 
                 if not (world_vector_delta.size == 3 and rotation_delta.size == 3 and open_gripper.size == 1):
-                    logging.warning(f"Unexpected action sizes: "
-                                    f"wv={world_vector_delta.shape}, rot={rotation_delta.shape}, grip={gripper.shape}. "
-                                    f"Falling back to LIBERO_DUMMY_ACTION.")
+                    logging.warning(
+                        f"Unexpected action sizes: "
+                        f"wv={world_vector_delta.shape}, rot={rotation_delta.shape}, grip={gripper.shape}. "
+                        f"Falling back to LIBERO_DUMMY_ACTION."
+                    )
                     raise ValueError(
                         f"Invalid action sizes: world_vector={world_vector_delta.shape}, "
                         f"rotation_delta={rotation_delta.shape}, gripper={gripper.shape}"
@@ -204,7 +234,7 @@ def eval_libero(args: Args) -> None:
                     delta_action = np.concatenate([world_vector_delta, rotation_delta, gripper], axis=0)
 
                 full_actions.append(delta_action)
-                
+
                 # __import__("ipdb").set_trace()
                 # see ../robosuite/controllers/controller_factory.py
                 obs, reward, done, info = env.step(delta_action.tolist())
@@ -222,54 +252,39 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path)
-                / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
-            
+
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
-            
+
             # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
             # Log current results
             logging.info(f"Success: {done}")
             logging.info(f"# episodes completed so far: {total_episodes}")
-            logging.info(
-                f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)"
-            )
+            logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
-        logging.info(
-            f"Current task success rate: {float(task_successes) / float(task_episodes)}"
-        )
-        logging.info(
-            f"Current total success rate: {float(total_successes) / float(total_episodes)}"
-        )
+        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(
-        f"Total success rate: {float(total_successes) / float(total_episodes)}"
-    )
+    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
 
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
-    task_bddl_file = (
-        pathlib.Path(get_libero_path("bddl_files"))
-        / task.problem_folder
-        / task.bddl_file
-    )
+    task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {
         "bddl_file_name": task_bddl_file,
         "camera_heights": resolution,
         "camera_widths": resolution,
     }
     env = OffScreenRenderEnv(**env_args)
-    env.seed(
-        seed
-    )  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
+    env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
 
 
@@ -293,11 +308,13 @@ def _quat2axisangle(quat):
 
 def start_debugpy_once():
     import debugpy
+
     if getattr(start_debugpy_once, "_started", False):
         return
     debugpy.listen(("0.0.0.0", 10092))
     print("🔍 Debug server started at 10092")
     start_debugpy_once._started = True
+
 
 if __name__ == "__main__":
     if os.getenv("DEBUG", False):

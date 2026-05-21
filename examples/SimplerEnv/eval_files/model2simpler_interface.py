@@ -60,7 +60,7 @@ class ModelClient:
         adaptive_ensemble_alpha = 0.1,
         host="0.0.0.0",
         port=10093,
-        apply_visual_aug: bool = False,
+        use_aug: bool = False,
         p_visual_aug: float = 1.0,
     ) -> None:
         
@@ -119,7 +119,8 @@ class ModelClient:
 
         self.action_norm_stats = self.get_action_stats(self.unnorm_key, policy_ckpt_path=policy_ckpt_path)
 
-        self.visual_aug = RoboSafeAugment(p_apply=p_visual_aug) if apply_visual_aug else None
+        self.visual_aug = RoboSafeAugment(p_apply=p_visual_aug) if use_aug else None
+        print(f"[ModelClient] visual_aug={'ON (p={:.2f})'.format(p_visual_aug) if use_aug else 'OFF'}")
         
 
     def _add_image_to_history(self, image: np.ndarray) -> None:

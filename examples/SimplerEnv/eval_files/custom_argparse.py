@@ -118,7 +118,7 @@ def get_args():
     parser.add_argument("--async-freq", type=int, default=1)
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Octo init rng seed")
     parser.add_argument("--port", type=int, default=10093)
-    parser.add_argument("--apply-visual-aug", action="store_true",
+    parser.add_argument("--use-aug", action="store_true",
                         help="Apply RoboSafeAugment to each observation image (robustness eval)")
     parser.add_argument("--p-visual-aug", type=float, default=1.0,
                         help="Probability of applying visual augmentation per step (default: 1.0)")
