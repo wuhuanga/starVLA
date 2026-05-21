@@ -1,6 +1,7 @@
 from collections import deque
 from typing import Optional, Sequence
 import os
+import random
 import cv2 as cv
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,11 +9,37 @@ from transforms3d.euler import euler2axangle
 from typing import Dict
 import numpy as np
 from pathlib import Path
+from PIL import Image as PILImage
 
+import torch
+import torchvision.transforms as T
 
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 from examples.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
 from starVLA.model.tools import read_mode_config
+
+
+class RoboSafeAugment:
+    """
+    Same medium-strength visual augmentation used in IntentVLA training.
+    Applied on PIL images; returns PIL image.
+    """
+    def __init__(self, p_apply: float = 1.0):
+        self.p_apply = p_apply
+        self.jitter = T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05)
+        self.resized_crop = T.RandomResizedCrop(size=224, scale=(0.8, 1.0), ratio=(0.9, 1.1))
+        self.to_tensor = T.ToTensor()
+        self.to_pil = T.ToPILImage()
+
+    def __call__(self, pil_image: PILImage.Image) -> PILImage.Image:
+        if random.random() > self.p_apply:
+            return pil_image
+        img = self.jitter(pil_image)
+        img = self.resized_crop(img)
+        t = self.to_tensor(img)
+        t = t + torch.randn_like(t) * 0.02
+        t = t.clamp(0.0, 1.0)
+        return self.to_pil(t)
 
 
 
@@ -33,6 +60,8 @@ class ModelClient:
         adaptive_ensemble_alpha = 0.1,
         host="0.0.0.0",
         port=10093,
+        apply_visual_aug: bool = False,
+        p_visual_aug: float = 1.0,
     ) -> None:
         
         # build client to connect server policy
@@ -89,6 +118,8 @@ class ModelClient:
         self.num_image_history = 0
 
         self.action_norm_stats = self.get_action_stats(self.unnorm_key, policy_ckpt_path=policy_ckpt_path)
+
+        self.visual_aug = RoboSafeAugment(p_apply=p_visual_aug) if apply_visual_aug else None
         
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
@@ -128,9 +159,12 @@ class ModelClient:
 
         assert image.dtype == np.uint8
         self._add_image_to_history(self._resize_image(image))
-        # image: Image.Image = Image.fromarray(image)
 
         image = self._resize_image(image)
+        if self.visual_aug is not None:
+            pil = PILImage.fromarray(image)
+            pil = self.visual_aug(pil)
+            image = np.array(pil)
         example = {
             "image": [image],
             "lang": self.task_description,

@@ -32,7 +32,9 @@ if __name__ == "__main__":
         policy_setup=args.policy_setup,
         port=args.port,
         action_scale=args.action_scale,
-        cfg_scale=1.5                  # cfg from 1.5 to 7 also performs well
+        cfg_scale=1.5,                  # cfg from 1.5 to 7 also performs well
+        apply_visual_aug=args.apply_visual_aug,
+        p_visual_aug=args.p_visual_aug,
     )
 
     # policy model creation; update this if you are using a new policy model
