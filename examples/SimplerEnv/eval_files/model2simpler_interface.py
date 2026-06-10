@@ -178,13 +178,6 @@ class ModelClient:
             "use_ddim": self.use_ddim,
             "num_ddim_steps": self.num_ddim_steps,
         }
-
-        vla_input = {
-            "examples": [example],
-            "do_sample": False,
-            "use_ddim": self.use_ddim,
-            "num_ddim_steps": self.num_ddim_steps,
-        }
         
    
         response = self.client.predict_action(vla_input)

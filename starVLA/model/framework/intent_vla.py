@@ -14,7 +14,14 @@
 #   (4) Intent extracted at action-query positions of the last VLM hidden layer.
 #   (5) Student action loss (main) + Teacher action loss (auxiliary, grad through shared head only).
 #   (6) VLM backbone is trainable (expected via LoRA externally). No detach on h0.
+#
+# train_variant controls which training objective is used:
+#   "base"               – clean input, action loss only (no aug, no distill)
+#   "aug_only"           – perturbed input, action loss only (no distill)
+#   "output_consistency" – clean + perturbed, velocity consistency on action head output
+#   "ridevla"            – full method: EMA teacher + representation distillation
 
+import contextlib
 import copy
 import json
 import random
@@ -118,17 +125,24 @@ class ParaphraseBank:
 @FRAMEWORK_REGISTRY.register("IntentVLA")
 class IntentVLA(baseframework):
     """
-    Intent-level self-distillation VLA.
+    Intent-level self-distillation VLA with four training variants.
 
-    Training forward does two VLM passes:
-      - Teacher pass (EMA VLM, no grad): clean image + original text
-      - Student pass (trainable VLM): augmented image + paraphrased text
+    train_variant = "ridevla" (default):
+        Teacher pass (EMA VLM, no grad): clean image + original text
+        Student pass (trainable VLM):    augmented image + paraphrased text
+        Losses: L_action_student + L_action_teacher + L_distill
 
-    Losses:
-      - L_action_student: primary action supervision from student intent
-      - L_action_teacher: auxiliary action supervision from teacher intent
-                         (grad flows only through shared action head)
-      - L_distill: 1 - cos(h_student, sg(h_teacher)) at action-query positions
+    train_variant = "base":
+        Single pass: clean image + original text
+        Loss: L_action only
+
+    train_variant = "aug_only":
+        Single pass: augmented image + paraphrased text
+        Loss: L_action only
+
+    train_variant = "output_consistency":
+        Two student passes: clean and perturbed
+        Losses: L_action_clean + L_action_pert + L_velocity_consistency
     """
 
     def __init__(self, config=None, **kwargs):
@@ -151,7 +165,7 @@ class IntentVLA(baseframework):
         )
         self.action_token_ids = None  # filled lazily
 
-        # ----- Flow-matching action head (shared by teacher and student paths) -----
+        # ----- Flow-matching action head (shared by all paths) -----
         self.action_model: FlowmatchingActionHead = get_action_model(config=self.config)
 
         am = config.framework.action_model
@@ -159,24 +173,36 @@ class IntentVLA(baseframework):
         self.past_action_window_size = am.past_action_window_size
         self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
 
-        # ----- Loss weights -----
+        # ----- Train variant -----
         fw = self.config.framework
+        self.train_variant = str(fw.get("train_variant", "ridevla")).lower()
+        assert self.train_variant in {"base", "aug_only", "output_consistency", "ridevla"}, (
+            f"Unknown train_variant: {self.train_variant}. "
+            "Expected one of: base | aug_only | output_consistency | ridevla"
+        )
+        logger.info(f"[IntentVLA] train_variant = {self.train_variant}")
+
+        # ----- Loss weights -----
         self.w_action_student = float(fw.get("w_action_student", 1.0))
         self.w_action_teacher = float(fw.get("w_action_teacher", 0.3))
         self.w_distill = float(fw.get("w_distill", 0.5))
+        self.w_output_consistency = float(fw.get("w_output_consistency", 0.5))
         self.distill_type = str(fw.get("distill_type", "cosine"))  # 'cosine' | 'mse' | 'infonce'
         self.infonce_temp = float(fw.get("infonce_temp", 0.1))
 
-        # ----- EMA teacher (deep copy of student VLM; params only, no grad) -----
-        # NOTE: this doubles VLM parameter memory. For very large backbones,
-        # consider EMA over the LoRA deltas only; left as future work.
-        teacher_vlm = copy.deepcopy(self.qwen_vl_interface)
-        for p in teacher_vlm.parameters():
-            p.requires_grad_(False)
-        teacher_vlm.eval()
-        # Keep EMA teacher out of nn.Module registration so optimizer/DeepSpeed
-        # only sees student parameters.
-        object.__setattr__(self, "_teacher_vlm", teacher_vlm)
+        # ----- EMA teacher (only created for ridevla to save memory) -----
+        # NOTE: creating the teacher doubles VLM parameter memory.
+        if self.train_variant == "ridevla":
+            teacher_vlm = copy.deepcopy(self.qwen_vl_interface)
+            for p in teacher_vlm.parameters():
+                p.requires_grad_(False)
+            teacher_vlm.eval()
+            # Keep EMA teacher out of nn.Module registration so optimizer/DeepSpeed
+            # only sees student parameters.
+            object.__setattr__(self, "_teacher_vlm", teacher_vlm)
+            logger.info("[IntentVLA] EMA teacher created.")
+        else:
+            object.__setattr__(self, "_teacher_vlm", None)
 
         self.ema_decay_init = float(fw.get("ema_decay_init", 0.99))
         self.ema_decay_final = float(fw.get("ema_decay_final", 0.9995))
@@ -195,6 +221,8 @@ class IntentVLA(baseframework):
 
     def _sync_teacher_device_dtype(self):
         """Move the unregistered EMA teacher alongside the student on demand."""
+        if self.teacher_vlm is None:
+            return
         student_model = self.qwen_vl_interface.model
         teacher_model = self.teacher_vlm.model
         student_param = next(student_model.parameters(), None)
@@ -241,6 +269,78 @@ class IntentVLA(baseframework):
             out.append(hidden_states[b, start:end, :])
         return torch.stack(out, dim=0)  # [B, K, H]
 
+    def _encode_action_queries(
+        self,
+        vlm,
+        batch_images: List[List[Image.Image]],
+        instructions: List[str],
+        tokenizer,
+        no_grad: bool = False,
+    ) -> torch.Tensor:
+        """Run a VLM forward and return action-query hidden states [B, K, H]."""
+        ctx = torch.no_grad() if no_grad else contextlib.nullcontext()
+        with ctx:
+            inputs = vlm.build_qwenvl_inputs(batch_images, instructions)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = vlm(
+                    **inputs,
+                    output_hidden_states=True,
+                    return_dict=True,
+                    use_cache=False,
+                )
+                last = out.hidden_states[-1].to(torch.float32)
+            return self._extract_intent(last, inputs["input_ids"], tokenizer)
+
+    def _prep_action_tensors(self, actions, state, device, dtype):
+        """Convert numpy actions/state to tensors and slice to the future window."""
+        actions_t = torch.tensor(actions, device=device, dtype=dtype)
+        actions_target = actions_t[:, -(self.future_action_window_size + 1):, :]
+        state_tensor = None
+        if state is not None:
+            state_tensor = torch.tensor(np.array(state), device=device, dtype=dtype)
+        return actions_target, state_tensor
+
+    def _compute_action_loss(
+        self,
+        h: torch.Tensor,
+        actions_target: torch.Tensor,
+        state_tensor,
+    ) -> torch.Tensor:
+        """Flow-matching action loss with repeated diffusion steps."""
+        repeated_steps = (
+            self.config.trainer.get("repeated_diffusion_steps", 4)
+            if self.config and self.config.trainer else 4
+        )
+        actions_rep = actions_target.repeat(repeated_steps, 1, 1)
+        state_rep = state_tensor.repeat(repeated_steps, 1, 1) if state_tensor is not None else None
+        h_rep = h.repeat(repeated_steps, 1, 1).float()
+        return self.action_model(h_rep, actions_rep, state_rep)
+
+    def _velocity_consistency_loss(
+        self,
+        h_clean: torch.Tensor,
+        h_pert: torch.Tensor,
+        actions_target: torch.Tensor,
+        state_tensor,
+    ) -> torch.Tensor:
+        """
+        Velocity consistency: sample a random noise level, compute predicted velocity
+        from both branches at the same noisy action, and penalise their divergence.
+        Gradient flows through h_pert; h_clean is used as the stop-gradient target.
+        """
+        B = actions_target.shape[0]
+        device = h_clean.device
+        dtype = h_clean.dtype
+
+        eps = torch.randn_like(actions_target)
+        s = torch.rand(B, device=device, dtype=dtype)        # [B]
+        s_bcast = s[:, None, None]                           # [B, 1, 1]
+        x_s = (1.0 - s_bcast) * eps + s_bcast * actions_target
+
+        v_clean = self.action_model.predict_velocity(h_clean.float(), x_s, s, state_tensor)
+        v_pert = self.action_model.predict_velocity(h_pert.float(), x_s, s, state_tensor)
+        return F.mse_loss(v_pert, v_clean.detach())
+
     # ------------------------------------------------------ distillation losses
     def _distill_loss(self, h_s: torch.Tensor, h_t: torch.Tensor) -> torch.Tensor:
         """
@@ -248,16 +348,14 @@ class IntentVLA(baseframework):
         Computed per-token then averaged.
         """
         if self.distill_type == "cosine":
-            # 1 - cos, averaged over K tokens and batch
             cos = F.cosine_similarity(h_s, h_t, dim=-1)  # [B, K]
             return (1.0 - cos).mean()
         elif self.distill_type == "mse":
             return F.mse_loss(h_s, h_t)
         elif self.distill_type == "infonce":
-            # Treat each sample's mean-pooled intent as the query; other samples in batch are negatives.
-            q = F.normalize(h_s.mean(dim=1), dim=-1)          # [B, H]
-            k = F.normalize(h_t.mean(dim=1), dim=-1)          # [B, H]
-            logits = q @ k.t() / self.infonce_temp             # [B, B]
+            q = F.normalize(h_s.mean(dim=1), dim=-1)   # [B, H]
+            k = F.normalize(h_t.mean(dim=1), dim=-1)   # [B, H]
+            logits = q @ k.t() / self.infonce_temp      # [B, B]
             labels = torch.arange(q.size(0), device=q.device)
             return F.cross_entropy(logits, labels)
         else:
@@ -279,11 +377,138 @@ class IntentVLA(baseframework):
                 out.append(ins)
         return out
 
+    # ------------------------------------------------------- variant forwards
+    def _forward_base(self, batch_images_raw, instructions_raw, actions, state, tokenizer):
+        """Clean input, single action loss, no augmentation."""
+        instructions = [ins + self.latent_action_query for ins in instructions_raw]
+        h = self._encode_action_queries(self.qwen_vl_interface, batch_images_raw, instructions, tokenizer)
+        actions_target, state_tensor = self._prep_action_tensors(actions, state, h.device, h.dtype)
+        with torch.autocast("cuda", dtype=torch.float32):
+            loss = self._compute_action_loss(h, actions_target, state_tensor)
+        zero = loss.new_zeros(())
+        return {
+            "loss": loss,
+            "action_loss": loss.detach(),
+            "action_loss_teacher": zero,
+            "distill_loss": zero,
+            "output_consistency_loss": zero,
+        }
+
+    def _forward_aug_only(self, batch_images_raw, instructions_raw, actions, state, tokenizer):
+        """Perturbed input, single action loss. Same augmentation as ridevla for fair comparison."""
+        batch_images_aug = self._augment_batch_images(batch_images_raw)
+        instructions = [
+            ins + self.latent_action_query
+            for ins in self._paraphrase_batch(instructions_raw)
+        ]
+        h = self._encode_action_queries(self.qwen_vl_interface, batch_images_aug, instructions, tokenizer)
+        actions_target, state_tensor = self._prep_action_tensors(actions, state, h.device, h.dtype)
+        with torch.autocast("cuda", dtype=torch.float32):
+            loss = self._compute_action_loss(h, actions_target, state_tensor)
+        zero = loss.new_zeros(())
+        return {
+            "loss": loss,
+            "action_loss": loss.detach(),
+            "action_loss_teacher": zero,
+            "distill_loss": zero,
+            "output_consistency_loss": zero,
+        }
+
+    def _forward_output_consistency(self, batch_images_raw, instructions_raw, actions, state, tokenizer):
+        """
+        Two student passes (clean + perturbed). No EMA teacher.
+        Aligns action head *velocity output* rather than hidden representations.
+        """
+        instructions_clean = [ins + self.latent_action_query for ins in instructions_raw]
+        batch_images_pert = self._augment_batch_images(batch_images_raw)
+        instructions_pert = [
+            ins + self.latent_action_query
+            for ins in self._paraphrase_batch(instructions_raw)
+        ]
+
+        h_clean = self._encode_action_queries(
+            self.qwen_vl_interface, batch_images_raw, instructions_clean, tokenizer
+        )
+        h_pert = self._encode_action_queries(
+            self.qwen_vl_interface, batch_images_pert, instructions_pert, tokenizer
+        )
+
+        actions_target, state_tensor = self._prep_action_tensors(
+            actions, state, h_clean.device, h_clean.dtype
+        )
+
+        with torch.autocast("cuda", dtype=torch.float32):
+            loss_act_clean = self._compute_action_loss(h_clean, actions_target, state_tensor)
+            loss_act_pert = self._compute_action_loss(h_pert, actions_target, state_tensor)
+            # h_clean is stop-grad target for velocity consistency — detach to avoid
+            # building a second computation graph through the clean VLM activations.
+            loss_out = self._velocity_consistency_loss(h_clean.detach(), h_pert, actions_target, state_tensor)
+
+        total = (
+            self.w_action_student * loss_act_pert
+            + self.w_action_teacher * loss_act_clean
+            + self.w_output_consistency * loss_out
+        )
+        zero = total.new_zeros(())
+        return {
+            "loss": total,
+            "action_loss": loss_act_pert.detach(),
+            "action_loss_teacher": loss_act_clean.detach(),
+            "distill_loss": zero,
+            "output_consistency_loss": loss_out.detach(),
+        }
+
+    def _forward_ridevla(self, batch_images_raw, instructions_raw, actions, state, tokenizer):
+        """Full RIDE-VLA: EMA teacher on clean view + student on perturbed view + distillation."""
+        assert self.teacher_vlm is not None, "ridevla requires EMA teacher."
+
+        instructions_teacher = [ins + self.latent_action_query for ins in instructions_raw]
+        batch_images_student = self._augment_batch_images(batch_images_raw)
+        instructions_student = [
+            ins + self.latent_action_query
+            for ins in self._paraphrase_batch(instructions_raw)
+        ]
+
+        self._sync_teacher_device_dtype()
+
+        h_teacher = self._encode_action_queries(
+            self.teacher_vlm, batch_images_raw, instructions_teacher, tokenizer, no_grad=True
+        )
+        h_teacher_sg = h_teacher.detach()
+
+        h_student = self._encode_action_queries(
+            self.qwen_vl_interface, batch_images_student, instructions_student, tokenizer
+        )
+
+        loss_distill = self._distill_loss(h_student, h_teacher_sg)
+
+        actions_target, state_tensor = self._prep_action_tensors(
+            actions, state, h_student.device, h_student.dtype
+        )
+
+        with torch.autocast("cuda", dtype=torch.float32):
+            loss_act_student = self._compute_action_loss(h_student, actions_target, state_tensor)
+            # h_teacher_sg is detached: grad flows only through shared action head params.
+            loss_act_teacher = self._compute_action_loss(h_teacher_sg, actions_target, state_tensor)
+
+        total = (
+            self.w_action_student * loss_act_student
+            + self.w_action_teacher * loss_act_teacher
+            + self.w_distill * loss_distill
+        )
+        zero = total.new_zeros(())
+        return {
+            "loss": total,
+            "action_loss": loss_act_student.detach(),
+            "action_loss_teacher": loss_act_teacher.detach(),
+            "distill_loss": loss_distill.detach(),
+            "output_consistency_loss": zero,
+        }
+
     # ------------------------------------------------------------------ forward
     def forward(self, examples: List[dict] = None, **kwargs) -> Dict[str, torch.Tensor]:
         tokenizer = self.qwen_vl_interface.processor.tokenizer
 
-        # --- raw batch
         batch_images_raw = [
             [to_pil_preserve(im) for im in (ex["image"] if isinstance(ex["image"], list) else [ex["image"]])]
             for ex in examples
@@ -292,91 +517,13 @@ class IntentVLA(baseframework):
         actions = np.array([ex["action"] for ex in examples])
         state = [ex["state"] for ex in examples] if "state" in examples[0] else None
 
-        # --- teacher view: clean image + original text (+ action query appended)
-        instructions_teacher = [ins + self.latent_action_query for ins in instructions_raw]
-
-        # --- student view: augmented image + paraphrased text (+ action query appended)
-        batch_images_student = self._augment_batch_images(batch_images_raw)
-        instructions_student = [
-            ins + self.latent_action_query
-            for ins in self._paraphrase_batch(instructions_raw)
-        ]
-
-        # ============== Teacher forward (EMA VLM, no grad) ==============
-        self._sync_teacher_device_dtype()
-        with torch.no_grad():
-            teacher_inputs = self.teacher_vlm.build_qwenvl_inputs(
-                batch_images_raw, instructions_teacher
-            )
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                teacher_out = self.teacher_vlm(
-                    **teacher_inputs,
-                    output_hidden_states=True,
-                    return_dict=True,
-                    use_cache=False,
-                )
-                teacher_last = teacher_out.hidden_states[-1].to(torch.float32)
-            h_teacher = self._extract_intent(
-                teacher_last, teacher_inputs["input_ids"], tokenizer
-            )  # [B, K, H]
-        h_teacher_sg = h_teacher.detach()
-
-        # ============== Student forward (trainable VLM) ==============
-        student_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
-            batch_images_student, instructions_student
-        )
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            student_out = self.qwen_vl_interface(
-                **student_inputs,
-                output_hidden_states=True,
-                return_dict=True,
-                use_cache=False,
-            )
-            student_last = student_out.hidden_states[-1].to(torch.float32)
-        h_student = self._extract_intent(
-            student_last, student_inputs["input_ids"], tokenizer
-        )  # [B, K, H]
-
-        # ============== Distillation loss ==============
-        loss_distill = self._distill_loss(h_student, h_teacher_sg)
-
-        # ============== Action losses (shared flow-matching head) ==============
-        with torch.autocast("cuda", dtype=torch.float32):
-            device = h_student.device
-            actions_t = torch.tensor(actions, device=device, dtype=h_student.dtype)
-            actions_target = actions_t[:, -(self.future_action_window_size + 1):, :]  # [B, chunk_len, action_dim]
-
-            state_tensor = None
-            if state is not None:
-                state_tensor = torch.tensor(np.array(state), device=device, dtype=h_student.dtype)
-
-            repeated_diff_steps = (
-                self.config.trainer.get("repeated_diffusion_steps", 4)
-                if self.config and self.config.trainer else 4
-            )
-            actions_target_rep = actions_target.repeat(repeated_diff_steps, 1, 1)
-            state_rep = state_tensor.repeat(repeated_diff_steps, 1, 1) if state_tensor is not None else None
-
-            h_student_rep = h_student.repeat(repeated_diff_steps, 1, 1).float()
-            h_teacher_rep = h_teacher_sg.repeat(repeated_diff_steps, 1, 1).float()
-
-            loss_act_student = self.action_model(h_student_rep, actions_target_rep, state_rep)
-            # Teacher path: h is detached, so gradient flows only through shared action head params.
-            loss_act_teacher = self.action_model(h_teacher_rep, actions_target_rep, state_rep)
-
-        # ============== Total ==============
-        total = (
-            self.w_action_student * loss_act_student
-            + self.w_action_teacher * loss_act_teacher
-            + self.w_distill * loss_distill
-        )
-
-        return {
-            "loss": total,
-            "action_loss": loss_act_student.detach(),
-            "action_loss_teacher": loss_act_teacher.detach(),
-            "distill_loss": loss_distill.detach(),
-        }
+        if self.train_variant == "base":
+            return self._forward_base(batch_images_raw, instructions_raw, actions, state, tokenizer)
+        if self.train_variant == "aug_only":
+            return self._forward_aug_only(batch_images_raw, instructions_raw, actions, state, tokenizer)
+        if self.train_variant == "output_consistency":
+            return self._forward_output_consistency(batch_images_raw, instructions_raw, actions, state, tokenizer)
+        return self._forward_ridevla(batch_images_raw, instructions_raw, actions, state, tokenizer)
 
     # ------------------------------------------------------------------ EMA
     def _current_ema_decay(self) -> float:
@@ -385,7 +532,9 @@ class IntentVLA(baseframework):
 
     @torch.no_grad()
     def update_ema(self):
-        """Call once per optimizer step, AFTER student weights are updated."""
+        """Call once per optimizer step, AFTER student weights are updated. No-op for non-ridevla."""
+        if self.teacher_vlm is None:
+            return
         self._sync_teacher_device_dtype()
         d = self._current_ema_decay()
         s_params = dict(self.qwen_vl_interface.named_parameters())
@@ -457,8 +606,11 @@ if __name__ == "__main__":
         type=str,
         default="./examples/MultiRobot/train_files/starvla_cotrain_multiRobot.yaml",
     )
+    parser.add_argument("--variant", type=str, default="ridevla",
+                        choices=["base", "aug_only", "output_consistency", "ridevla"])
     args, _ = parser.parse_known_args()
     cfg = OmegaConf.load(args.config_yaml)
+    cfg.framework.train_variant = args.variant
 
     model = IntentVLA(cfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -473,13 +625,16 @@ if __name__ == "__main__":
 
     out = model([sample, sample])
     print(
-        f"[forward] total={out['loss'].item():.4f} | "
+        f"[{args.variant}] total={out['loss'].item():.4f} | "
         f"act_s={out['action_loss'].item():.4f} | "
         f"act_t={out['action_loss_teacher'].item():.4f} | "
-        f"distill={out['distill_loss'].item():.4f}"
+        f"distill={out['distill_loss'].item():.4f} | "
+        f"out_cons={out['output_consistency_loss'].item():.4f}"
     )
 
-    model.update_ema()
+    if args.variant == "ridevla":
+        model.update_ema()
+
     pred = model.predict_action([sample])
     print(f"[predict] shape={pred['normalized_actions'].shape}")
     print("IntentVLA ready.")

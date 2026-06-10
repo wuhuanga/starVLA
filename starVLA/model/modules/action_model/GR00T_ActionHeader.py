@@ -328,6 +328,45 @@ class FlowmatchingActionHead(nn.Module):
         else:
             raise ValueError(f"Unknown reduction: {reduction}. Use 'mean' / 'none' / 'sum'.")
 
+    def predict_velocity(
+        self,
+        vl_embs: torch.Tensor,
+        x_s: torch.Tensor,
+        t_cont: torch.Tensor,
+        state: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Return predicted velocity v(x_s, t | vl_embs) at a given noisy action and time.
+        Used by the Output/Velocity Consistency baseline.
+
+        vl_embs: [B, seq_len, H]
+        x_s:     [B, T_action, action_dim]  – noisy action at time t
+        t_cont:  [B]                         – continuous time in [0, 1]
+        Returns: [B, T_action, action_dim]
+        """
+        device = vl_embs.device
+        t_discretized = (t_cont * self.num_timestep_buckets).long()
+        action_features = self.action_encoder(x_s, t_discretized)
+        state_features = self.state_encoder(state) if state is not None else None
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+            action_features = action_features + pos_embs
+        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+        sa_embs = (
+            torch.cat((state_features, future_tokens, action_features), dim=1)
+            if state_features is not None
+            else torch.cat((future_tokens, action_features), dim=1)
+        )
+        model_output = self.model(
+            hidden_states=sa_embs,
+            encoder_hidden_states=vl_embs,
+            timestep=t_discretized,
+            return_all_hidden_states=False,
+        )
+        pred = self.action_decoder(model_output)
+        return pred[:, -x_s.shape[1]:]
+
     @torch.no_grad()
     def predict_action(self, vl_embs: torch.Tensor, state: torch.Tensor = None, vision_features: torch.Tensor = None) -> torch.Tensor:
         # Set initial actions as the sampled noise.

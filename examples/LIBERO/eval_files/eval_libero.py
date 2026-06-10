@@ -69,6 +69,9 @@ class Args:
 
     job_name: str = "test"
 
+    results_out: str = ""  # path to save per-task JSON results (for LIBERO-plus category aggregation)
+    no_video: bool = False  # skip video saving (recommended for LIBERO-plus with thousands of tasks)
+
     # BayesianCAG guidance parameters (ignored by non-BayesianCAG models)
     omega: float = 0.0  # CAG guidance scale. 0.0 = use model default from config
     guidance_mode: str = ""  # "latent", "action" or "velocity". "" = use model default
@@ -100,6 +103,8 @@ def eval_libero(args: Args) -> None:
         max_steps = 520  # longest training demo has 505 steps
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
+    elif args.task_suite_name == "libero_mix":
+        max_steps = 520  # multi-step kitchen/living-room tasks, similar length to libero_10
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
@@ -122,6 +127,7 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    task_results: dict = {}  # task_name -> success_rate (for results_out / LIBERO-plus)
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
@@ -248,14 +254,14 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            if not args.no_video:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
@@ -267,11 +273,19 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+        task_rate = float(task_successes) / float(task_episodes)
+        task_results[task.name] = task_rate
+        logging.info(f"Current task success rate: {task_rate}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+
+    if args.results_out:
+        pathlib.Path(args.results_out).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.results_out, "w") as f:
+            json.dump({"suite": args.task_suite_name, "tasks": task_results}, f, indent=2)
+        logging.info(f"Per-task results saved to {args.results_out}")
 
 
 def _get_libero_env(task, resolution, seed):

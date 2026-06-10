@@ -280,6 +280,12 @@ class VLATrainer(TrainerUtils):
         metrics = {"action_dit_loss": output_dict["action_loss"].item()}
         if "cd_loss" in output_dict:
             metrics["cd_loss"] = output_dict["cd_loss"].item()
+        if "distill_loss" in output_dict:
+            metrics["distill_loss"] = output_dict["distill_loss"].item()
+        if "action_loss_teacher" in output_dict:
+            metrics["action_loss_teacher"] = output_dict["action_loss_teacher"].item()
+        if "output_consistency_loss" in output_dict:
+            metrics["output_consistency_loss"] = output_dict["output_consistency_loss"].item()
         return metrics
 
     def eval_action_model(self, step_metrics: dict | None = None):
