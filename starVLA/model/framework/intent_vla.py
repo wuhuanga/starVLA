@@ -37,6 +37,7 @@ from PIL import Image
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.modules.vlm import get_vlm_model
+from starVLA.model.modules.vlm.QWen2_5 import IMAGE_TOKEN_INDEX
 from starVLA.model.modules.action_model.GR00T_ActionHeader import get_action_model, FlowmatchingActionHead
 from starVLA.training.trainer_utils import initialize_overwatch
 from starVLA.training.trainer_utils.trainer_tools import resize_images
@@ -189,6 +190,12 @@ class IntentVLA(baseframework):
         self.w_output_consistency = float(fw.get("w_output_consistency", 0.5))
         self.distill_type = str(fw.get("distill_type", "cosine"))  # 'cosine' | 'mse' | 'infonce'
         self.infonce_temp = float(fw.get("infonce_temp", 0.1))
+        self.distill_locus = str(fw.get("distill_locus", "action_query"))
+        assert self.distill_locus in {"action_query", "visual", "all_hidden", "output"}, (
+            f"Unknown distill_locus: {self.distill_locus}. "
+            "Expected one of: action_query | visual | all_hidden | output"
+        )
+        logger.info(f"[IntentVLA] distill_locus = {self.distill_locus}")
 
         # ----- EMA teacher (only created for ridevla to save memory) -----
         # NOTE: creating the teacher doubles VLM parameter memory.
@@ -291,6 +298,33 @@ class IntentVLA(baseframework):
                 last = out.hidden_states[-1].to(torch.float32)
             return self._extract_intent(last, inputs["input_ids"], tokenizer)
 
+    def _encode_full_hidden(
+        self,
+        vlm,
+        batch_images: List[List[Image.Image]],
+        instructions: List[str],
+        tokenizer,
+        no_grad: bool = False,
+    ):
+        """Run VLM forward; return (h_action [B,K,H], h_full [B,L,H], input_ids [B,L]).
+
+        Used by visual / all_hidden loci which need the full last-layer hidden states,
+        not just the action-query slice.
+        """
+        ctx = torch.no_grad() if no_grad else contextlib.nullcontext()
+        with ctx:
+            inputs = vlm.build_qwenvl_inputs(batch_images, instructions)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = vlm(
+                    **inputs,
+                    output_hidden_states=True,
+                    return_dict=True,
+                    use_cache=False,
+                )
+                last = out.hidden_states[-1].to(torch.float32)
+            h_action = self._extract_intent(last, inputs["input_ids"], tokenizer)
+            return h_action, last, inputs["input_ids"]
+
     def _prep_action_tensors(self, actions, state, device, dtype):
         """Convert numpy actions/state to tensors and slice to the future window."""
         actions_t = torch.tensor(actions, device=device, dtype=dtype)
@@ -360,6 +394,28 @@ class IntentVLA(baseframework):
             return F.cross_entropy(logits, labels)
         else:
             raise ValueError(f"Unknown distill_type: {self.distill_type}")
+
+    def _select_visual_mean_pool(
+        self, h_full: torch.Tensor, input_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Mean-pool the visual-token hidden states for each sample. Returns [B, H].
+
+        Uses IMAGE_TOKEN_INDEX to locate vision tokens in input_ids.
+        Mean-pooling is required here because random crop can change the spatial
+        layout of visual tokens, so token-wise alignment is not well-defined.
+        """
+        mask = (input_ids == IMAGE_TOKEN_INDEX)  # [B, L]
+        out = []
+        for b in range(h_full.shape[0]):
+            vis_h = h_full[b, mask[b]]  # [n_vis, H]
+            assert vis_h.numel() > 0, f"Sample {b}: no IMAGE tokens found in input_ids."
+            out.append(vis_h.mean(0))
+        return torch.stack(out)  # [B, H]
+
+    def _distill_loss_pooled(self, z_s: torch.Tensor, z_t: torch.Tensor) -> torch.Tensor:
+        """Cosine distillation on pooled [B, H] vectors. z_t must be already detached."""
+        cos = F.cosine_similarity(z_s, z_t, dim=-1)  # [B]
+        return (1.0 - cos).mean()
 
     # -------------------------------------------------------------- augmenters
     def _augment_batch_images(self, batch_images: List[List[Image.Image]]) -> List[List[Image.Image]]:
@@ -459,7 +515,16 @@ class IntentVLA(baseframework):
         }
 
     def _forward_ridevla(self, batch_images_raw, instructions_raw, actions, state, tokenizer):
-        """Full RIDE-VLA: EMA teacher on clean view + student on perturbed view + distillation."""
+        """Full RIDE-VLA: EMA teacher on clean view + student on perturbed view + distillation.
+
+        The distillation target is controlled by self.distill_locus:
+          "action_query" (default) – token-wise cosine on the K action-query hidden states [B,K,H]
+          "visual"                 – mean-pool cosine over visual-token hidden states [B,H]
+          "all_hidden"             – mean-pool cosine over the full last-layer sequence [B,H]
+          "output"                 – MSE on action-head velocity with shared (s, eps) noise
+        All four variants share the same backbone, EMA teacher, augmentation pipeline,
+        lambda weights, and training steps for a fair locus ablation.
+        """
         assert self.teacher_vlm is not None, "ridevla requires EMA teacher."
 
         instructions_teacher = [ins + self.latent_action_query for ins in instructions_raw]
@@ -471,20 +536,51 @@ class IntentVLA(baseframework):
 
         self._sync_teacher_device_dtype()
 
-        h_teacher = self._encode_action_queries(
-            self.teacher_vlm, batch_images_raw, instructions_teacher, tokenizer, no_grad=True
-        )
-        h_teacher_sg = h_teacher.detach()
+        # ------------------------------------------------------------------
+        # Encode teacher and student; compute locus-specific distill loss.
+        # ------------------------------------------------------------------
+        if self.distill_locus in {"visual", "all_hidden"}:
+            # Need full last-layer hidden states to select the right token slice.
+            h_teacher, h_full_teacher, ids_teacher = self._encode_full_hidden(
+                self.teacher_vlm, batch_images_raw, instructions_teacher, tokenizer, no_grad=True
+            )
+            h_teacher_sg = h_teacher.detach()
 
-        h_student = self._encode_action_queries(
-            self.qwen_vl_interface, batch_images_student, instructions_student, tokenizer
-        )
+            h_student, h_full_student, ids_student = self._encode_full_hidden(
+                self.qwen_vl_interface, batch_images_student, instructions_student, tokenizer
+            )
 
-        loss_distill = self._distill_loss(h_student, h_teacher_sg)
+            if self.distill_locus == "visual":
+                z_t = self._select_visual_mean_pool(h_full_teacher.detach(), ids_teacher)
+                z_s = self._select_visual_mean_pool(h_full_student, ids_student)
+            else:  # all_hidden: mean-pool the entire sequence
+                z_t = h_full_teacher.detach().mean(dim=1)  # [B, H]
+                z_s = h_full_student.mean(dim=1)            # [B, H]
+
+            loss_distill = self._distill_loss_pooled(z_s, z_t)
+
+        else:
+            # action_query and output loci only need action-query hidden states.
+            h_teacher_sg = self._encode_action_queries(
+                self.teacher_vlm, batch_images_raw, instructions_teacher, tokenizer, no_grad=True
+            ).detach()
+            h_student = self._encode_action_queries(
+                self.qwen_vl_interface, batch_images_student, instructions_student, tokenizer
+            )
+            # loss_distill for "output" is computed below after _prep_action_tensors.
+            if self.distill_locus == "action_query":
+                loss_distill = self._distill_loss(h_student, h_teacher_sg)
 
         actions_target, state_tensor = self._prep_action_tensors(
             actions, state, h_student.device, h_student.dtype
         )
+
+        if self.distill_locus == "output":
+            # Align action-head velocity with shared (s, eps): teacher is stop-grad target.
+            with torch.autocast("cuda", dtype=torch.float32):
+                loss_distill = self._velocity_consistency_loss(
+                    h_teacher_sg, h_student, actions_target, state_tensor
+                )
 
         with torch.autocast("cuda", dtype=torch.float32):
             loss_act_student = self._compute_action_loss(h_student, actions_target, state_tensor)
