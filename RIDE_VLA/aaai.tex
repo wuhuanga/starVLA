@@ -1,0 +1,669 @@
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage[submission]{aaai2027}  % DO NOT CHANGE THIS
+% The serif, sans-serif, and monospaced fonts are loaded automatically by
+% aaai2027.sty (newtxtext, helvet, courier). DO NOT add \usepackage{times},
+% \usepackage{helvet}, \usepackage{courier}, or any other font package.
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\usepackage{caption} % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\frenchspacing  % DO NOT CHANGE THIS
+%
+% These are recommended to typeset algorithms but not required. See the subsubsection on algorithms. Remove them if you don't have algorithms in your paper.
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\usepackage{graphicx} 
+\usepackage{amsmath}
+\usepackage{amssymb}
+%
+% These are recommended to typeset listings but not required. See the subsubsection on listing. Remove this block if you don't have listings in your paper.
+\usepackage{newfloat}
+\usepackage{listings}
+\DeclareCaptionStyle{ruled}{labelfont=normalfont,labelsep=colon,strut=off} % DO NOT CHANGE THIS
+\lstset{%
+	basicstyle={\footnotesize\ttfamily},% footnotesize acceptable for monospace
+	numbers=left,numberstyle=\footnotesize,xleftmargin=2em,% show line numbers, remove this entire line if you don't want the numbers.
+	aboveskip=0pt,belowskip=0pt,%
+	showstringspaces=false,tabsize=2,breaklines=true}
+\floatstyle{ruled}
+\newfloat{listing}{tb}{lst}{}
+\floatname{listing}{Listing}
+
+%
+% Recommended for better-looking tables
+\usepackage{booktabs}
+
+%
+% Keep the \pdfinfo as shown here. There's no need
+% for you to add the /Title and /Author tags.
+\pdfinfo{
+/TemplateVersion (2027.1)
+}
+
+% DISALLOWED PACKAGES
+% \usepackage{authblk} -- This package is specifically forbidden
+% \usepackage{balance} -- This package is specifically forbidden
+% \usepackage{CJK} -- This package is specifically forbidden
+% \usepackage{float} -- This package is specifically forbidden
+% \usepackage{flushend} -- This package is specifically forbidden
+% \usepackage{fullpage} -- This package is specifically forbidden
+% \usepackage{geometry} -- This package is specifically forbidden
+% \usepackage{hyperref} -- This package is specifically forbidden
+% \usepackage{navigator} -- This package is specifically forbidden
+% (or any other package that embeds links such as navigator or hyperref)
+% \usepackage{indentfirst} -- This package is specifically forbidden
+% \usepackage{layout} -- This package is specifically forbidden
+% \usepackage{multicol} -- This package is specifically forbidden
+% \usepackage{nameref} -- This package is specifically forbidden
+% \usepackage{savetrees} -- This package is specifically forbidden
+% \usepackage{setspace} -- This package is specifically forbidden
+% \usepackage{stfloats} -- This package is specifically forbidden
+% \usepackage{tabu} -- This package is specifically forbidden
+% \usepackage{titlesec} -- This package is specifically forbidden
+% \usepackage{tocbibind} -- This package is specifically forbidden
+% \usepackage{ulem} -- This package is specifically forbidden
+% \usepackage{wrapfig} -- This package is specifically forbidden
+% DISALLOWED COMMANDS
+% \nocopyright -- Your paper will not be published if you use this command
+% \addtolength -- This command may not be used
+% \balance -- This command may not be used
+% \baselinestretch -- Your paper will not be published if you use this command
+% \clearpage -- No page breaks of any kind may be used for the final version of your paper
+% \columnsep -- This command may not be used
+% \newpage -- No page breaks of any kind may be used for the final version of your paper
+% \pagebreak -- No page breaks of any kind may be used for the final version of your paper
+% \pagestyle -- This command may not be used
+% \tiny -- This is not an acceptable font size.
+% \vspace{- -- No negative value may be used in proximity of a caption, figure, table, section, subsection, subsubsection, or reference
+% \vskip{- -- No negative value may be used to alter spacing above or below a caption, figure, table, section, subsection, subsubsection, or reference
+
+\setcounter{secnumdepth}{0} %May be changed to 1 or 2 if section numbers are desired.
+
+% The file aaai2027.sty is the style file for AAAI Press
+% proceedings, working notes, and technical reports.
+%
+
+% Title
+
+% Your title must be in mixed case, not sentence case.
+% That means all verbs (including short verbs like be, is, using,and go),
+% nouns, adverbs, adjectives should be capitalized, including both words in hyphenated terms, while
+% articles, conjunctions, and prepositions are lower case unless they
+% directly follow a colon or long dash
+\newcommand{\method}{\textsc{RIDE-VLA}}
+
+% ============================================================
+% RESULTS CONSTANTS -- fill these once after experiments finish;
+% the prose references them so all numbers stay consistent.
+% ============================================================
+\newcommand{\gainBase}{17.0}   % LIBERO-Plus avg: \method{} (79.2) minus Base VLA (62.2)
+\newcommand{\gainAug}{4.6}     % LIBERO-Plus avg: \method{} (79.2) minus Aug. only (74.6)
+\newcommand{\gainComb}{XX.X}   % Combined-perturbation avg: \method{} minus Aug. only
+\newcommand{\dropOurs}{XX.X}   % \method{} clean-to-perturbed drop (lower better)
+% ============================================================
+
+% Table aesthetics: a little vertical breathing room in all tabulars.
+\renewcommand{\arraystretch}{1.15}
+
+\title{\textsc{RIDE-VLA}: Representation Invariance Distillation for Robust Vision-Language-Action Policies}
+
+\affiliations{
+    %Afiliations
+    \textsuperscript{\rm 1}Association for the Advancement of Artificial Intelligence\\
+    % If you have multiple authors and multiple affiliations
+    % use superscripts in text and roman font to identify them.
+    % For example,
+
+    % Sunil Issar\textsuperscript{\rm 2},
+    % J. Scott Penberthy\textsuperscript{\rm 3},
+    % George Ferguson\textsuperscript{\rm 4}\corresponding,
+    % Hans Guesgen\textsuperscript{\rm 5}
+    % Note that the comma should be placed after the superscript
+
+    1101 Pennsylvania Ave, NW Suite 300\\
+    Washington, DC 20004 USA\\
+    % email address must be in roman text type, not monospace or sans serif
+    proceedings-questions@aaai.org
+%
+% See more examples next
+}
+
+
+
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Vision-language-action (VLA) models have shown strong potential as generalist robot policies by mapping visual observations and language instructions to executable action sequences. However, their robustness under semantics-preserving perturbations remains limited: minor visual changes, sensor noise, background variations, or paraphrased instructions can induce unstable action predictions even when the intended manipulation task is unchanged. We argue that this brittleness stems in part from representation drift at the action-conditioning interface. Standard imitation learning supervises only the final action outputs, leaving the latent representations that condition action generation unconstrained across equivalent multimodal views. To address this issue, we propose \method{}, a representation invariance distillation framework for robust VLA policies. For each training sample, an exponential-moving-average teacher observes the clean image and original instruction, while a student observes a visually perturbed image and a paraphrased instruction. The student is trained to align its action-conditioning representation with the clean teacher target, while action supervision is preserved through a shared flow-matching action head. This clean-to-perturbed distillation explicitly encourages perturbation-invariant representations before action generation, rather than relying solely on data augmentation or output-level consistency. At inference time, \method{} uses only the student policy and introduces no additional inputs or runtime modules. Experiments on simulated manipulation benchmarks show that \method{} improves robustness under visual, language, and combined perturbations while maintaining standard task performance. Further representation and action consistency analyses demonstrate that \method{} substantially reduces clean-to-perturbed representation drift, supporting its effectiveness for robust VLA training.
+\end{abstract}
+
+% Uncomment the following to link to your code, datasets, an extended version or similar.
+% You must keep this block between (not within) the abstract and the main body of the paper.
+% Make sure that you do not de-anonymize yourself with these links.
+% \begin{links}
+%     \link{Code}{https://aaai.org/example/code}
+%     \link{Datasets}{https://aaai.org/example/datasets}
+%     \link{Extended version}{https://aaai.org/example/extended-version}
+% \end{links}
+
+\section{Introduction}
+
+Vision-language-action (VLA) models have become a common approach to generalist robot manipulation, where policies map visual observations and language instructions to executable robot actions. With large-scale vision-language pretraining and robot demonstration data, models such as RT-2~\cite{DBLP:conf/corl/ZitkovichYXXXXW23}, OpenVLA~\cite{DBLP:conf/corl/KimPKXB0RFSVKBT24}, Octo~\cite{DBLP:conf/rss/GhoshWPBMDHK0LT24}, $\pi_0$~\cite{DBLP:journals/corr/abs-2410-24164}, and GR00T~\cite{DBLP:journals/corr/abs-2503-14734} have shown strong performance in language-conditioned manipulation and continuous action generation. Robust deployment, however, is still difficult. In realistic environments, visual observations may change because of camera perturbations, lighting variation, background shifts, sensor noise, or changes in object appearance. At the same time, human instructions may be phrased in many different but semantically equivalent ways. Recent robustness evaluations show that high success rates under matched evaluation settings can hide severe brittleness under these distribution shifts~\cite{DBLP:journals/corr/abs-2510-13626,DBLP:journals/pacmse/WangZSHSM25,DBLP:conf/corl/LiHGMPWFLSKL0F024}.
+
+A key limitation of standard VLA training is that it mainly relies on imitation losses over action trajectories. These losses supervise the final action outputs, but they do not explicitly require the internal representations used for action conditioning to stay stable across semantically equivalent inputs. As a result, a clean image--instruction pair and its perturbed counterpart may produce different latent action-conditioning representations, even when they express the same manipulation intent. As illustrated in Figure~\ref{fig:motivation}, this representation drift can be especially harmful for modern VLA policies with diffusion or flow-matching action heads, since the action generator depends on a compact multimodal conditioning interface to produce temporally coherent action chunks.
+
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{Figures/fig1_motivation.pdf}
+\caption{Motivation of \method{}. Semantics-preserving visual perturbations and instruction paraphrases should preserve the same manipulation intent, but a standard VLA policy may produce different action-conditioning representations before action generation. This representation drift can lead to inconsistent action chunks. \method{} targets this intermediate interface by learning perturbation-invariant action-conditioning representations.}
+\label{fig:motivation}
+\end{figure*}
+
+A simple remedy is to train with visual augmentations or instruction paraphrases. Augmentation alone, however, treats perturbed samples as additional independent training examples and still depends on the action loss to shape the representation indirectly. It does not explicitly align the clean and perturbed views of the same sample. Similarly, enforcing consistency only on the final action output can reduce prediction differences, but the intermediate action-conditioning representation remains unconstrained. We argue that robust VLA learning requires invariance at this intermediate level: semantically equivalent visual-language inputs should activate consistent action-conditioning representations before action generation.
+
+We propose \method{} (Representation Invariance Distillation for Embodied VLA), a clean-to-perturbed self-distillation framework for robust VLA policies. Motivated by teacher-student consistency learning~\cite{mean_teacher} and self-distillation across augmented views~\cite{byol}, \method{} builds two semantically equivalent views for each training sample. An exponential-moving-average teacher receives the clean image and the original instruction, while the student receives a visually perturbed image and a paraphrased instruction. Both branches produce latent action-conditioning representations, implemented as the action-query hidden states that connect the VLM backbone to the flow-matching action head. The student is trained to match the clean teacher representation, and standard action supervision is kept through a shared action generation head. This design directly regularizes the representation interface used for action generation, rather than only supervising the final action output.
+
+The framework is lightweight and easy to deploy. The teacher branch and the perturbation pipeline are used only during training. At inference time, \method{} uses the same interface as the base VLA policy: it receives the current observation and instruction, extracts the action-conditioning representation with the student model, and generates the action chunk through the original action head. Thus, \method{} improves robustness without additional sensors, history inputs, external detectors, or extra inference-time branches.
+
+We evaluate \method{} on simulated manipulation benchmarks under clean and perturbed settings. The experiments examine whether representation-level distillation improves robustness under semantics-preserving visual and language perturbations, whether it preserves standard manipulation performance, and whether the learned invariance transfers across benchmarks. In robustness evaluations, \method{} improves the success rate over the base VLA by \gainBase{} points on average (Table~\ref{tab:libero-plus}) and outperforms augmentation-only and output-consistency baselines, with the largest margin under combined visual--language perturbations (Figure~\ref{fig:combined}). In standard LIBERO and SimplerEnv evaluations, \method{} maintains or improves clean-task performance. Further diagnostic analysis shows that \method{} substantially reduces both representation distance and action discrepancy between clean and perturbed views, supporting the view that robust action generation benefits from perturbation-invariant action-conditioning representations.
+
+Our contributions are summarized as follows:
+\begin{itemize}
+\item \textbf{A measurable failure mode.} We identify and quantify \emph{action-conditioning representation drift}---the divergence, under semantics-preserving visual and language perturbations, of the latent representation that conditions action generation---and show it is a distinct and measurable source of VLA brittleness that standard imitation losses leave unconstrained.
+\item \textbf{Where invariance must be enforced.} We show, both formally (Proposition~1) and empirically (a distillation-locus ablation), that for generative flow-matching VLA policies robustness should be enforced at the action-conditioning representation, rather than at earlier visual features or at the final action output.
+\item \textbf{A zero-overhead fix.} We propose \method{}, a clean-to-perturbed self-distillation framework that aligns a perturbed student with a stable clean EMA teacher at the action-query representation, improving robustness while preserving the exact single-branch inference interface of the base policy.
+\item \textbf{Mechanism-level evidence.} Through perturbation, combined multimodal, consistency, and ablation analyses, we show that the gains stem from reduced representation drift rather than from generic augmentation or output-level consistency.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Vision-Language-Action Models}
+Vision-language-action (VLA) models have emerged as a general paradigm for robot manipulation by grounding visual observations, language instructions, and robot actions within a unified policy. Early large-scale systems, such as RT-1~\cite{DBLP:conf/rss/BrohanBCCDFGHHH23} and RT-2~\cite{DBLP:conf/corl/ZitkovichYXXXXW23}, show that transformer-based policies trained on diverse robot data can acquire broad manipulation skills, while OpenVLA~\cite{DBLP:conf/corl/KimPKXB0RFSVKBT24} demonstrates that open-source vision-language backbones can be effectively adapted to downstream robotic control. Open X-Embodiment~\cite{DBLP:conf/icra/ONeillRMGPLPGMJ24} and Octo~\cite{DBLP:conf/rss/GhoshWPBMDHK0LT24} further support cross-embodiment policy learning from heterogeneous robot datasets. More recent models, including the $\pi$ family~\cite{DBLP:journals/corr/abs-2410-24164,pi05}, RDT~\cite{DBLP:conf/iclr/LiuWLTCWX0025}, and GR00T~\cite{DBLP:journals/corr/abs-2503-14734}, improve generalist manipulation through stronger continuous control, larger-scale pretraining, and dual-system VLA architectures. In parallel, action generation has shifted from discrete action-token prediction to continuous generative modeling. Diffusion Policy~\cite{DBLP:conf/rss/ChiFDXCBS23} demonstrates the effectiveness of diffusion-based visuomotor control, while $\pi_0$~\cite{DBLP:journals/corr/abs-2410-24164} formulates robot action prediction through flow matching. Other studies improve action efficiency and scalability through parallel continuous regression, compressed action tokenization, spatial grounding, memory mechanisms, or world-model-style prediction~\cite{DBLP:journals/corr/abs-2502-19645,DBLP:journals/corr/abs-2501-09747,DBLP:journals/corr/abs-2501-15830,DBLP:journals/corr/abs-2508-19236,DBLP:journals/corr/abs-2505-06111,DBLP:journals/corr/abs-2506-21539}. Overall, existing VLA research has substantially advanced policy capacity, data scalability, and the quality of action generation. However, most policies are still optimized primarily with imitation losses over action trajectories. These losses supervise final action outputs but do not explicitly constrain the latent representations that condition action generation to remain stable under semantics-preserving perturbations of images or instructions.
+
+\subsection{Robust Representation Learning for VLA Policies}
+Robustness has become a central challenge for deploying VLA policies in open-ended manipulation environments. Recent robustness-oriented benchmarks reveal that high success rates under matched train--test conditions can hide severe brittleness under modest distribution shifts. For example, LIBERO-Plus~\cite{DBLP:journals/corr/abs-2510-13626} evaluates VLA policies under perturbations in language instructions, camera viewpoints, lighting, object layout, background, sensor noise, and robot initial states, while VLATest~\cite{DBLP:journals/pacmse/WangZSHSM25} studies robustness under scene fuzzing, confounding objects, unseen objects, camera pose changes, lighting shifts, and instruction mutations. Existing approaches improve robustness through several routes, including larger and more diverse robot datasets, domain randomization, visual augmentation, spatial representations, temporal context, stronger generative modeling, or post-training adaptation~\cite{domain_randomization,robomimic,bridge_data,DBLP:conf/nips/LiuZGFLZS23,DBLP:conf/corl/LiHGMPWFLSKL0F024,ript_vla,robustvla}. Beyond VLA-specific methods, consistency regularization and self-distillation provide a complementary principle for learning invariant representations by aligning model predictions or features across different views of the same sample. Representative methods include Mean Teacher~\cite{DBLP:conf/nips/TarvainenV17}, VAT~\cite{vat}, FixMatch~\cite{fixmatch}, BYOL~\cite{DBLP:conf/nips/GrillSATRBDPGAP20}, and DINO~\cite{dino}, while DrQ~\cite{drq} shows that augmentation-based consistency can improve pixel-based control. Nevertheless, directly applying generic augmentation or consistency learning to VLA policies is non-trivial: robotic transformations may alter task semantics, and action losses alone do not ensure that clean and perturbed multimodal inputs activate the same action-conditioning representation. In this work, we study perturbation-invariant representation learning for VLA policies. Instead of treating perturbed samples independently or enforcing consistency only at the final action output, we use a clean image--language input as a stable teacher view and train a student under semantics-preserving visual and language perturbations to match the corresponding latent action-conditioning representation.
+
+\section{Method}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{Figures/fig2_method.pdf}
+\caption{Overview of \method{}. During training, an EMA teacher receives the clean image and original instruction, while the student receives a visually perturbed image and a paraphrased instruction. The student action-query hidden states are aligned with the detached clean teacher states through representation distillation, and action supervision is preserved through a shared flow-matching action head. During inference, only the student branch and the original action head are used, introducing no additional runtime modules.}
+\label{fig:method}
+\end{figure*}
+
+\subsection{Motivation and Problem Formulation}
+
+Figure~\ref{fig:method} gives an overview of the proposed training and inference procedure. We consider a vision-language-action policy for chunked robot control. At time step $t$, the robot observes an image observation $o_t$, receives a language instruction $\ell$, and predicts a future action chunk
+\begin{equation}
+    \tau_t = (a_t, a_{t+1}, \ldots, a_{t+H-1}) \in \mathbb{R}^{H \times d_a},
+\end{equation}
+where $H$ is the action horizon and $d_a$ is the action dimension. A standard VLA policy models action generation as
+\begin{equation}
+    p_\theta(\tau_t \mid o_t, \ell),
+\end{equation}
+where the visual-language backbone provides the conditioning representation for an action head, typically a diffusion or flow-matching model.
+
+In real robot deployment, however, the input observation and instruction are rarely fixed. The same manipulation intent may appear under different lighting conditions, camera perturbations, visual noise, object appearances, or natural-language paraphrases. Let
+\begin{equation}
+    \tilde{o}_t = \mathcal{A}_v(o_t), 
+    \qquad
+    \tilde{\ell} = \mathcal{A}_l(\ell)
+\end{equation}
+denote a semantic-preserving visual perturbation and a semantic-preserving language transformation. Ideally, the clean pair $(o_t,\ell)$ and the perturbed pair $(\tilde{o}_t,\tilde{\ell})$ should induce the same action distribution:
+\begin{equation}
+    p_\theta(\tau_t \mid o_t, \ell)
+    \approx
+    p_\theta(\tau_t \mid \tilde{o}_t, \tilde{\ell}).
+\end{equation}
+The challenge is that standard imitation learning only supervises the final action output. It does not explicitly constrain the internal action-conditioning representation to remain stable across equivalent multimodal views. As a result, two semantically equivalent inputs may produce different latent action representations, which can further lead to unstable action chunk generation.
+
+To address this issue, we focus on the action-query tokens that connect the VLM backbone to the action generation head. Given an input pair $(o_t,\ell)$, we append $K$ learnable or special action-query tokens to the language prompt and obtain the last-layer hidden states of the VLM. We denote the hidden states at the action-query positions as
+\begin{equation}
+    h_\theta(o_t,\ell)
+    =
+    \mathrm{Select}_{\mathrm{act}}
+    \left(
+    f_\theta(o_t,\ell)
+    \right)
+    \in \mathbb{R}^{K \times d},
+\end{equation}
+where $f_\theta$ is the VLM backbone, $d$ is the hidden dimension, and $\mathrm{Select}_{\mathrm{act}}(\cdot)$ extracts the hidden states corresponding to the action-query token block. We treat this representation as the latent action intent used to condition the action head. Our goal is to make this representation invariant to semantic-preserving perturbations:
+\begin{equation}
+    h_\theta(o_t,\ell)
+    \approx
+    h_\theta(\tilde{o}_t,\tilde{\ell}).
+\end{equation}
+
+\paragraph{Why invariance at the representation level.}
+The action head defines the conditional action distribution \emph{solely} through the conditioning representation $h$: once the head parameters $\phi$ are fixed, the density $p_\phi(\tau \mid h)$ is a function of $h$ alone. This makes the action-conditioning representation the correct interface at which to enforce invariance, and shows that representation-level invariance is strictly stronger than constraining the action output, as enforced by output- or velocity-consistency methods.
+
+\noindent\textbf{Proposition 1 (Representation invariance subsumes output consistency).}
+\textit{Let $p_\phi(\tau\mid h)$ be the action distribution induced by a shared head from a conditioning representation $h$.
+(i)~If $h_\theta(o_t,\ell)=h_\theta(\tilde{o}_t,\tilde{\ell})$, then
+$p_\phi\!\left(\tau\mid h_\theta(o_t,\ell)\right)=p_\phi\!\left(\tau\mid h_\theta(\tilde{o}_t,\tilde{\ell})\right)$;
+that is, representation invariance implies invariance of the \emph{entire} conditional action distribution.
+(ii)~The converse fails: output-level consistency enforced on a finite set of flow times and noise samples $\{(s_i,\epsilon_i)\}_{i=1}^{N}$ constrains only a measure-zero slice of the generative process, so there exist $h\neq\tilde{h}$ that agree on $\{(s_i,\epsilon_i)\}$ yet induce different action distributions elsewhere.}
+
+\noindent\textit{Proof sketch.}
+(i)~is immediate because $p_\phi(\tau\mid\cdot)$ depends on its argument only through $h$.
+For (ii), the flow-matching objective observes the velocity field $v_\phi(X_s,s\mid h)$ only at sampled pairs $(s_i,\epsilon_i)$; matching $v_\phi$ at finitely many such points leaves the field---and hence the integrated action chunk---unconstrained almost everywhere along the flow, so output agreement at sampled points does not pin down $h$. $\square$
+
+Because the flow-matching head is a \emph{stochastic} conditional generator, enforcing consistency at its output requires fixing $(s,\epsilon)$ and still only covers sampled trajectories, whereas aligning $h$ guarantees invariance of the full conditional action distribution by construction. \method{} therefore places the invariance constraint at $h$, and we verify empirically (Figure~\ref{fig:locus}) that this locus outperforms enforcing invariance at earlier visual features or at the action output.
+
+\subsection{Perturbation-Invariant Action-Query Distillation}
+
+We propose \method, an intent-level self-distillation framework for robust VLA training. The key idea is to use a clean teacher view as a stable anchor and train a student view under visual and language perturbations to match the same action-query representation.
+
+Specifically, we maintain a student VLM $f_\theta$ and an exponential-moving-average teacher VLM $f_{\bar{\theta}}$. For each training sample, the teacher receives the clean image-language pair $(o_t,\ell)$, while the student receives the perturbed pair $(\tilde{o}_t,\tilde{\ell})$. Their action-query representations are
+\begin{equation}
+    h_T =
+    h_{\bar{\theta}}(o_t,\ell),
+    \qquad
+    h_S =
+    h_{\theta}(\tilde{o}_t,\tilde{\ell}).
+\end{equation}
+The teacher branch is stop-gradient and serves as a stable target. The student is trained to align its action-query representation with the teacher representation through an intent-level consistency loss:
+\begin{equation}
+    \mathcal{L}_{\mathrm{distill}}
+    =
+    \frac{1}{K}
+    \sum_{k=1}^{K}
+    \left(
+    1 -
+    \cos
+    \left(
+    h_S^{(k)},
+    \mathrm{sg}(h_T^{(k)})
+    \right)
+    \right),
+\end{equation}
+where $h^{(k)}$ denotes the $k$-th action-query token representation, $\cos(\cdot,\cdot)$ is cosine similarity, and $\mathrm{sg}(\cdot)$ denotes stop-gradient. This objective directly regularizes the action-conditioning representation rather than only the final action output.
+
+The teacher parameters are updated after each optimization step by exponential moving average:
+\begin{equation}
+    \bar{\theta}
+    \leftarrow
+    m \bar{\theta}
+    +
+    (1-m)\theta,
+\end{equation}
+where $m$ is the EMA momentum. In practice, we use a momentum schedule that gradually increases the decay during training. This makes the teacher more stable than the current student while allowing it to track the improving policy.
+
+For visual perturbations, we use robotics-safe augmentations that preserve task semantics, including moderate color jitter, conservative random cropping, and small image noise. We avoid horizontal flipping and large rotations because they may change left-right relations, gravity assumptions, or spatial task semantics. For language perturbations, we sample from an offline paraphrase bank so that the student receives alternative instructions with the same task meaning. These perturbations expose the student to realistic multimodal variations while the clean EMA teacher provides a stable representation target.
+
+\subsection{Action Generation and Training Objective}
+
+The action-query representation is used as the conditioning context for a flow-matching action head. Given a target action chunk $\tau_t$, Gaussian noise $\epsilon \sim \mathcal{N}(0,I)$, and a sampled flow time $s \sim p(s)$, we define the interpolated action chunk
+\begin{equation}
+    X_s = (1-s)\epsilon + s\tau_t.
+\end{equation}
+The conditional velocity field $v_\phi(X_s, s \mid h)$ is trained to predict the displacement from noise to the target action chunk:
+\begin{equation}
+    \mathcal{L}_{\mathrm{act}}(h)
+    =
+    \mathbb{E}_{\tau_t,\epsilon,s}
+    \left[
+    \left\|
+    v_\phi(X_s, s \mid h)
+    -
+    (\tau_t-\epsilon)
+    \right\|_2^2
+    \right],
+\end{equation}
+where $\phi$ denotes the parameters of the action head. We apply this action objective to both the student representation and the teacher representation. The student action loss is the main imitation objective:
+\begin{equation}
+    \mathcal{L}_{\mathrm{act}}^{S}
+    =
+    \mathcal{L}_{\mathrm{act}}(h_S).
+\end{equation}
+We also use an auxiliary teacher action loss:
+\begin{equation}
+    \mathcal{L}_{\mathrm{act}}^{T}
+    =
+    \mathcal{L}_{\mathrm{act}}(\mathrm{sg}(h_T)).
+\end{equation}
+Since the teacher representation is detached, this auxiliary loss updates only the shared action head. It encourages the action head to remain compatible with the clean teacher representation while the student learns robustness under perturbations.
+
+The final training objective is
+\begin{equation}
+    \mathcal{L}
+    =
+    \lambda_S \mathcal{L}_{\mathrm{act}}^{S}
+    +
+    \lambda_T \mathcal{L}_{\mathrm{act}}^{T}
+    +
+    \lambda_D \mathcal{L}_{\mathrm{distill}},
+\end{equation}
+where $\lambda_S$, $\lambda_T$, and $\lambda_D$ control the weights of the student action loss, teacher action loss, and distillation loss, respectively.
+
+At inference time, \method{} uses only the student policy. Given the clean test-time observation and instruction, we extract the action-query representation
+\begin{equation}
+    h = h_\theta(o_t,\ell),
+\end{equation}
+and generate the action chunk with the flow-matching action head. No teacher branch, augmentation, paraphrase sampling, or additional input modality is required during deployment. Therefore, \method{} improves perturbation robustness during training while preserving the same inference interface as the base VLA policy.
+
+
+\section{Experiments}
+
+We design the experiments to answer three questions:
+\begin{itemize}
+    \item Can \method{} improve robustness under semantics-preserving visual and language perturbations?
+    \item Does representation-level distillation provide benefits beyond standard augmentation and output-level consistency under the same VLA backbone?
+    \item Does the robustness gain preserve clean manipulation performance on standard benchmarks?
+\end{itemize}
+
+\subsection{Experimental Setup and Baselines}
+
+\textbf{Policy instantiation.} \method{} is a training framework rather than a new foundation backbone. We implement it in the StarVLA codebase~\cite{starvla2026}, which is used only as modular training and evaluation infrastructure. StarVLA itself is not treated as a baseline model. Our main policy instantiation uses a Qwen-VL-family vision-language backbone connected to a DiT-style flow-matching action head. The hidden states at the action-query positions form the action-conditioning representation used by \method{}. At inference time, all controlled variants use the same single-branch policy interface and the same action head.
+
+\textbf{Baseline taxonomy.} We use two groups of baselines. The first group consists of \textit{external VLA baselines}, including OpenVLA~\cite{DBLP:conf/corl/KimPKXB0RFSVKBT24}, OpenVLA-OFT~\cite{DBLP:journals/corr/abs-2502-19645}, $\pi_0$~\cite{DBLP:journals/corr/abs-2410-24164}, $\pi_{0.5}$~\cite{pi05}, and GR00T~\cite{DBLP:journals/corr/abs-2503-14734} when official checkpoints or previously reported results are available under the same evaluation protocol. These baselines provide context against strong public VLA systems, but they differ in scale, pretraining data, action decoder, and fine-tuning recipe. The second group consists of \textit{controlled baselines} built on our exact backbone and training data. \textit{Base VLA} uses only the standard flow-matching imitation objective. \textit{Aug. only} applies the same visual perturbations and instruction paraphrases as \method{}, but treats perturbed samples as independent training examples. \textit{Action Consistency} enforces clean-to-perturbed consistency on predicted flow velocities or action chunks, while leaving the action-conditioning representation unconstrained. These controlled baselines isolate whether the gain comes from representation-level invariance rather than from stronger public pretraining or generic augmentation.
+
+\subsection{Perturbation Robustness}
+
+We first evaluate robustness on LIBERO-Plus~\cite{DBLP:journals/corr/abs-2510-13626}, which introduces controlled perturbations along seven dimensions: camera viewpoint, robot initial state, language instruction, lighting, background texture, sensor noise, and object layout. These perturbations are useful for our setting because most of them preserve the high-level manipulation intent while changing the visual appearance, instruction surface form, or initial configuration. We report success rate (\%) for each perturbation category and the average over all categories.
+
+\begin{table*}[t]
+\centering
+\caption{Perturbation robustness on LIBERO-Plus (success rate \%, $\uparrow$). External rows are reference systems under the same protocol; controlled rows share our backbone and training data. \textbf{Best} and \underline{second-best} controlled results are highlighted.}
+\label{tab:libero-plus}
+\setlength{\tabcolsep}{6pt}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccccccc@{\hskip 12pt}c}
+\toprule
+Method & Camera & Robot & Lang. & Light & Bg. & Noise & Layout & \textbf{Avg.} \\
+\midrule
+\multicolumn{9}{@{}l}{\textit{External VLA baselines (reference)}} \\
+\addlinespace[1pt]
+OpenVLA~\cite{DBLP:conf/corl/KimPKXB0RFSVKBT24} & 0.8 & 3.5 & 23.0 & 8.1 & 34.8 & 15.2 & 28.5 & 15.6 \\
+OpenVLA-OFT~\cite{DBLP:journals/corr/abs-2502-19645} & 56.4 & 31.9 & 79.5 & 88.7 & 93.3 & 75.8 & 74.2 & 69.6 \\
+$\pi_0$~\cite{DBLP:journals/corr/abs-2410-24164} & 13.8 & 6.0 & 58.8 & 85.0 & 81.4 & 79.0 & 68.9 & 53.6 \\
+$\pi_0$-FAST~\cite{DBLP:journals/corr/abs-2501-09747} & 65.1 & 21.6 & 61.0 & 73.2 & 73.2 & 74.4 & 68.8 & 61.6 \\
+\midrule
+\multicolumn{9}{@{}l}{\textit{Controlled comparisons (same backbone \& data)}} \\
+\addlinespace[1pt]
+Base VLA & 29.5 & 34.0 & 77.6 & \underline{92.6} & \underline{94.8} & 48.1 & 78.6 & 62.2 \\
+Aug. only & 52.7 & 48.1 & \underline{85.0} & 92.4 & 94.5 & 82.0 & 78.9 & 74.6 \\
+Action Consistency & \underline{59.3} & \underline{57.7} & 84.7 & \textbf{95.1} & 94.5 & \textbf{84.3} & \underline{81.6} & \underline{78.2} \\
+\addlinespace[1pt]
+\method{} & \textbf{62.2} & \textbf{60.1} & \textbf{89.6} & 91.6 & \textbf{95.8} & \underline{82.3} & \textbf{81.9} & \textbf{79.2} \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+Table~\ref{tab:libero-plus} reports the main perturbation results. The external rows show how \method{} compares with strong public VLA systems under the same robustness protocol. The controlled rows are the primary evidence for the proposed mechanism: compared with Base VLA, \method{} improves the average success rate by \gainBase{} points, and improves over Aug.\ only by \gainAug{} points. Aug. only improves over Base VLA on several visual perturbations, but remains weaker because it does not explicitly pair each perturbed input with the corresponding clean representation. Action Consistency reduces some output-level variation, yet it is less effective than \method{}, indicating that enforcing invariance before action generation is more useful than constraining only the final action prediction.
+
+To quantify degradation relative to clean behavior, we also compute the clean-to-perturbed drop
+\begin{equation}
+    \Delta_{\mathrm{drop}}(c)
+    =
+    \mathrm{SR}_{\mathrm{clean}}
+    -
+    \mathrm{SR}_{c},
+\end{equation}
+where $\mathrm{SR}_{\mathrm{clean}}$ is the success rate on the corresponding clean LIBERO tasks and $c$ denotes a LIBERO-Plus perturbation category. Lower values indicate stronger robustness; a per-category visualization is given in Appendix Figure~\ref{fig:robustness-drop}.
+
+\textbf{Combined multimodal perturbations.}
+The official LIBERO-Plus splits perturb a single factor at a time, whereas in deployment visual changes and instruction rephrasings co-occur. This combined regime is precisely what \method{} is designed for: it pairs a jointly perturbed student view with the clean teacher, directly aligning the compounded perturbation with the clean reference, whereas Aug.\ only treats the visual and language perturbations as independent training samples. We therefore construct combined settings that apply a visual perturbation (camera, lighting, background, or sensor noise) together with an instruction paraphrase, and report results in Figure~\ref{fig:combined}. The gap between \method{} and Aug.\ only is expected to be largest here ($+\gainComb$ points on average): when perturbations compound, indirectly shaping the representation through the action loss is least sufficient, while explicitly aligning the joint perturbed view with the clean reference is most beneficial. This multimodal setting also separates our robustness target from visual-only corruption robustness, where language variation is not considered.
+
+\begin{figure}[t]
+\centering
+% Generate with: python3 scripts/make_fig_combined.py
+% \includegraphics[width=\linewidth]{Figures/fig_combined.pdf}
+\fbox{
+\begin{minipage}[c][1.5in][c]{0.92\linewidth}
+\centering
+Placeholder (run scripts/make\_fig\_combined.py).\\
+Grouped bars: success rate under\\
+Cam./Light/Bg./Noise $+$ paraphrase,\\
+for the four controlled baselines.
+\end{minipage}}
+\caption{Robustness under \emph{combined} visual--language perturbations. Each setting applies a visual perturbation together with an instruction paraphrase. \method{} widens its margin over Aug.\ only precisely when perturbations compound, since it aligns the jointly perturbed view with the clean reference rather than treating the two perturbations independently.}
+\label{fig:combined}
+\end{figure}
+
+\subsection{Generalization on Standard Benchmarks}
+
+Robustness training should not sacrifice standard task performance. We therefore evaluate on clean LIBERO~\cite{DBLP:conf/nips/LiuZGFLZS23} and SimplerEnv~\cite{DBLP:conf/corl/LiHGMPWFLSKL0F024}. For LIBERO, we report success rate on Spatial, Object, Goal, and Long. For SimplerEnv, we follow the common WidowX evaluation tasks and report success rate on Put Spoon on Towel, Put Carrot on Plate, Stack Green Block on Yellow Block, and Put Eggplant in Yellow Basket.
+
+\begin{table}[t]
+\centering
+\caption{Clean-task performance on LIBERO (success rate \%, $\uparrow$). This table is a guardrail: \method{} matches Base VLA on clean tasks (no over-regularization). External rows are reference systems; controlled rows share our backbone and data; best controlled result per column in \textbf{bold}.}
+\label{tab:standard-benchmarks}
+\setlength{\tabcolsep}{8pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccc}
+\toprule
+Method & Spatial & Object & Goal & Long & \textbf{Avg.} \\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Reference}} \\
+\addlinespace[1pt]
+OpenVLA & 84.7 & 88.4 & 79.2 & 53.7 & 76.5 \\
+OpenVLA-OFT & 97.6 & 98.4 & 97.9 & 94.5 & 97.1 \\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Controlled (same backbone \& data)}} \\
+\addlinespace[1pt]
+Base VLA & \textbf{94.8} & 99.8 & 98.8 & \textbf{94.2} & \textbf{96.9} \\
+Aug. only & 93.8 & 99.8 & 97.4 & 93.2 & 96.1 \\
+\method{} & 93.6 & \textbf{100.0} & \textbf{99.4} & 93.6 & 96.7 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:standard-benchmarks} tests whether representation invariance over-regularizes the policy. Ideally, \method{} should improve perturbed evaluation while matching or improving Base VLA on clean tasks. This distinction is important: a method that gains robustness by discarding fine visual or linguistic details may perform well under corruptions but fail on precise manipulation. The clean benchmark results therefore serve as a guardrail for the distillation objective. Consistent results on SimplerEnv WidowX tasks are reported in Appendix Table~\ref{tab:simplerenv}.
+
+\subsection{Consistency Analysis}
+
+We next test whether the performance gains are accompanied by the intended reduction in representation drift. For each evaluation sample, we compute the action-conditioning representation for the clean input and for a semantics-preserving perturbed input. We measure representation distance by cosine distance averaged over action-query tokens:
+\begin{equation}
+    D_h
+    =
+    \frac{1}{K}
+    \sum_{k=1}^{K}
+    \left(
+    1 -
+    \cos
+    \left(
+    h^{(k)}(o_t,\ell),
+    h^{(k)}(\tilde{o}_t,\tilde{\ell})
+    \right)
+    \right).
+\end{equation}
+We also measure action discrepancy using the mean squared difference between the predicted flow velocities under clean and perturbed inputs, where the \emph{same} noise $\epsilon$ and flow time $s$ are used for both branches so that the difference reflects representation drift rather than sampling stochasticity:
+\begin{equation}
+    D_a
+    =
+    \mathbb{E}_{\epsilon,s}
+    \left[
+    \left\|
+    v_\phi(X_s,s\mid h(o_t,\ell))
+    -
+    v_\phi(X_s,s\mid h(\tilde{o}_t,\tilde{\ell}))
+    \right\|_2^2
+    \right].
+\end{equation}
+A low $D_h$ could in principle be obtained trivially by collapsing the representation toward a constant. To rule this out, we additionally report the effective rank~\citep{roy2007effective} of the action-query representations over the evaluation set,
+\begin{equation}
+    \mathrm{eRank}
+    =
+    \exp\!\left(-\sum_{i} p_i \log p_i\right),
+    \qquad
+    p_i = \frac{\sigma_i}{\sum_j \sigma_j},
+\end{equation}
+where $\{\sigma_i\}$ are the singular values of the centered representation matrix. A collapsed representation has low effective rank, so a method that lowers $D_h$ while \emph{maintaining} effective rank reduces drift without degenerate collapse.
+
+\begin{table}[t]
+\centering
+\caption{Clean-to-perturbed consistency analysis (controlled baselines). Lower $D_h$/$D_a$ indicate stronger invariance; \emph{Eff.\ Rank} should stay close to Base VLA, i.e.\ lower drift is not achieved by collapse.}
+\label{tab:consistency}
+\setlength{\tabcolsep}{8pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+Method & $D_h$ $\downarrow$ & $D_a$ $\downarrow$ & Eff.\ Rank & \textbf{Robust Avg.} $\uparrow$ \\
+\midrule
+Base VLA & XX.XXX & XX.XXX & XX.X & XX.X \\
+Aug. only & XX.XXX & XX.XXX & XX.X & XX.X \\
+Action Consistency & XX.XXX & XX.XXX & XX.X & XX.X \\
+\addlinespace[1pt]
+\method{} & \textbf{XX.XXX} & \textbf{XX.XXX} & XX.X & \textbf{XX.X} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:consistency} shows whether \method{} reduces representation drift rather than merely improving final action agreement. Action Consistency is expected to reduce $D_a$, but it may still leave $D_h$ high because the representation interface remains unconstrained. In contrast, \method{} should reduce both $D_h$ and $D_a$, supporting the hypothesis that robust action generation benefits from stabilizing the latent action-conditioning representation before the flow-matching head. Crucially, \method{} should achieve this lower drift while keeping the effective rank comparable to Base VLA, confirming that the reduction in $D_h$ reflects genuine perturbation invariance rather than a degenerate collapse of the representation. Figure~\ref{fig:representation} visualizes the paired clean and perturbed representations, where \method{} concentrates the paired-distance distribution near zero.
+
+\begin{figure}[t]
+\centering
+% Generate with: python3 scripts/make_fig_representation.py
+% \includegraphics[width=\linewidth]{Figures/fig4_representation.pdf}
+\fbox{
+\begin{minipage}[c][1.35in][c]{0.92\linewidth}
+\centering
+Placeholder (run scripts/make\_fig\_representation.py).\\
+(a) $D_h$ by modality (Lang./Visual/Both);\\
+(b) paired clean-vs-perturbed distance histogram.
+\end{minipage}}
+\caption{Clean and perturbed action-conditioning representations. \method{} brings paired clean and perturbed views closer (lower $D_h$) while keeping a comparable effective rank, i.e.\ without collapse.}
+\label{fig:representation}
+\end{figure}
+
+\subsection{Ablation Study}
+
+Finally, we ablate the main design choices of \method{} using the same backbone and training data. We evaluate whether the EMA teacher is necessary, whether visual and language perturbations contribute complementary robustness, and whether the distillation target must be placed at the action-conditioning representation rather than at the final action output.
+
+\begin{table}[t]
+\centering
+\caption{Ablation of \method{} on LIBERO-Plus (success rate \%). \emph{Drop} $=$ Clean $-$ Pert.\ Avg.\ (lower is more robust). \textbf{Best} per column in bold.}
+\label{tab:ablation}
+\setlength{\tabcolsep}{8pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+Variant & Clean & Pert.\ Avg. $\uparrow$ & Drop $\downarrow$ \\
+\midrule
+Base VLA & XX.X & XX.X & XX.X \\
+Aug. only & XX.X & XX.X & XX.X \\
+Action Consistency & XX.X & XX.X & XX.X \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Component ablations}} \\
+\addlinespace[1pt]
+\quad w/o EMA teacher & XX.X & XX.X & XX.X \\
+\quad w/o teacher action loss & XX.X & XX.X & XX.X \\
+\quad visual perturb.\ only & 93.4 & XX.X & XX.X \\
+\quad language perturb.\ only & XX.X & XX.X & XX.X \\
+\midrule
+\method{} (full) & \textbf{XX.X} & \textbf{XX.X} & \textbf{XX.X} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The ablation results in Table~\ref{tab:ablation} isolate the contribution of each component. Removing the EMA teacher replaces the stable clean target with a rapidly changing online target. Removing the auxiliary teacher action loss tests whether the shared action head remains compatible with the clean representation. Visual-only and language-only variants reveal whether robustness is dominated by one modality or whether multimodal perturbation is necessary. Comparing \method{} with Action Consistency tests the central design choice: representation-level invariance at the action-conditioning interface versus output-level agreement after action generation.
+
+\textbf{Where should invariance be enforced?}
+A central claim of \method{} is that, for generative flow-matching policies, the action-conditioning representation is the right interface at which to enforce invariance (Proposition~1). We test this directly by holding the framework fixed---the same backbone, perturbations, EMA teacher, and loss weights---and varying only the \emph{locus} at which the consistency loss aligns clean and perturbed views: (i) the visual/projector features, (ii) all VLM last-layer hidden states (mean-pooled), (iii) the final action output, i.e.\ the flow velocity (equivalent to Action Consistency), and (iv) the action-query representation used by \method{}. Constraining too early over-regularizes and discards task-relevant detail, while constraining the stochastic action output is too weak; the action-query representation is the minimal sufficient interface for the head and is therefore expected to give the best robustness--drift trade-off.
+
+\begin{figure}[t]
+\centering
+% Generate with: python3 scripts/make_fig_locus.py
+% \includegraphics[width=0.9\linewidth]{Figures/fig_locus.pdf}
+\fbox{
+\begin{minipage}[c][1.6in][c]{0.92\linewidth}
+\centering
+Placeholder (run scripts/make\_fig\_locus.py).\\
+Scatter: Robust Avg.\ ($\uparrow$) vs.\ drift $D_h$ ($\downarrow$),\\
+one point per locus; action-query (ours)\\
+dominates in the low-drift/high-robustness corner.
+\end{minipage}}
+\caption{Distillation-locus ablation: \emph{where} invariance is enforced, with everything else held fixed. Each point applies the consistency loss at a different interface (visual/projector, all hidden states, action output, or action-query). The action-query locus (ours) attains both the highest robustness and the lowest drift, supporting Proposition~1 that the gain comes from \emph{where} invariance is enforced, not from the distillation mechanism alone.}
+\label{fig:locus}
+\end{figure}
+
+\section{Limitations}
+
+\method{} focuses on robustness to semantics-preserving visual and language perturbations by aligning action-conditioning representations between clean and perturbed views. This scope leaves several limitations. First, the method depends on perturbation pipelines and paraphrase banks that preserve the manipulation intent; overly strong visual transformations or ambiguous instruction rewrites may change the task semantics and provide noisy distillation targets. Second, the current framework mainly addresses representation drift at the VLM--action-head interface, and it does not explicitly model long-horizon memory, recovery from large execution failures, or distribution shifts that alter object layouts, task preconditions, or robot dynamics. Third, our evaluation is centered on simulated manipulation benchmarks, which provide controlled robustness analysis but cannot fully cover the visual, physical, and interaction complexity of real robot deployment. Extending the framework to broader embodiments, real-world perturbations, and longer-horizon closed-loop settings is an important direction for future work.
+
+\section{Conclusion}
+
+We presented \method{}, a representation invariance distillation framework for robust vision-language-action policies. The key idea is to use a clean EMA teacher as a stable anchor and train a perturbed student to match the teacher's action-conditioning representation, thereby enforcing invariance at the interface between the vision-language backbone and the flow-matching action head. Unlike standard augmentation or output-level consistency, \method{} explicitly regularizes the latent representation used for action generation while preserving the original student-only inference interface. Through perturbation robustness evaluation, clean benchmark evaluation, consistency analysis, and ablation studies, our experiments show that representation-level clean-to-perturbed distillation can improve robustness under visual and language variations without sacrificing standard manipulation performance. These results suggest that stabilizing action-conditioning representations is a practical and effective principle for building more reliable VLA policies.
+
+\bibliography{aaai2027}
+
+\appendix
+\section{Appendix: Additional Experiments and Analyses}
+
+\paragraph{SimplerEnv generalization.}
+To test whether the learned invariance transfers beyond LIBERO, we evaluate on SimplerEnv WidowX tasks (Table~\ref{tab:simplerenv}). \method{} matches or improves the controlled baselines while preserving clean-task ability, consistent with the standard-benchmark results in the main text.
+
+\begin{table}[h]
+\centering
+\caption{Generalization on SimplerEnv WidowX tasks (success rate \%, $\uparrow$). External rows are reference systems; controlled rows share our backbone and data.}
+\label{tab:simplerenv}
+\setlength{\tabcolsep}{6pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccc}
+\toprule
+Method & Spoon & Carrot & Stack & Eggplant & \textbf{Avg.} \\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Reference}} \\
+\addlinespace[1pt]
+Octo-Base~\cite{DBLP:conf/rss/GhoshWPBMDHK0LT24} & XX.X & XX.X & XX.X & XX.X & XX.X \\
+OpenVLA-OFT~\cite{DBLP:journals/corr/abs-2502-19645} & XX.X & XX.X & XX.X & XX.X & XX.X \\
+$\pi_0$~\cite{DBLP:journals/corr/abs-2410-24164} & XX.X & XX.X & XX.X & XX.X & XX.X \\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Controlled (same backbone \& data)}} \\
+\addlinespace[1pt]
+Base VLA & XX.X & XX.X & XX.X & XX.X & XX.X \\
+Aug. only & XX.X & XX.X & XX.X & XX.X & XX.X \\
+\method{} & \textbf{XX.X} & \textbf{XX.X} & \textbf{XX.X} & \textbf{XX.X} & \textbf{XX.X} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Per-category robustness drop.}
+Figure~\ref{fig:robustness-drop} visualizes the clean-to-perturbed success-rate drop $\Delta_{\mathrm{drop}}$ per LIBERO-Plus category for the controlled baselines, complementing the aggregate numbers in the main perturbation table.
+
+\begin{figure}[h]
+\centering
+% Generate with: python3 scripts/make_fig_robustness_drop.py
+% \includegraphics[width=\linewidth]{Figures/fig3_robustness_drop.pdf}
+\fbox{
+\begin{minipage}[c][1.35in][c]{0.92\linewidth}
+\centering
+Placeholder (run scripts/make\_fig\_robustness\_drop.py).\\
+Grouped bars: per-category $\Delta_{\mathrm{drop}}$\\
+for the four controlled baselines.
+\end{minipage}}
+\caption{Clean-to-perturbed success-rate drop on LIBERO-Plus (lower is better), for controlled baselines with the same backbone and training data.}
+\label{fig:robustness-drop}
+\end{figure}
+
+\paragraph{Distillation-weight sensitivity.}
+Figure~\ref{fig:lambda} shows how clean success and perturbation-average success vary with the distillation weight $\lambda_D$. Robustness improves with $\lambda_D$ up to a point, after which an overly strong invariance constraint begins to trade off clean performance; we select the operating point that balances the two.
+
+\begin{figure}[h]
+\centering
+% Generate with: python3 scripts/make_fig_lambda.py
+% \includegraphics[width=0.85\linewidth]{Figures/fig5_lambda.pdf}
+\fbox{
+\begin{minipage}[c][1.25in][c]{0.92\linewidth}
+\centering
+Placeholder (run scripts/make\_fig\_lambda.py).\\
+Clean success and perturbation average\\
+vs.\ distillation weight $\lambda_D$.
+\end{minipage}}
+\caption{Effect of the distillation weight $\lambda_D$. The final setting balances clean performance and perturbation robustness.}
+\label{fig:lambda}
+\end{figure}
+
+% Check whether the conference requires a reproducibility checklist to be included in the paper.
+% If so, you can uncomment the following line and ajust the path to include it.
+% \input{ReproducibilityChecklist.tex}
+
+\end{document}

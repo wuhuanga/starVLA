@@ -1,0 +1,282 @@
+{
+    "open the top drawer and put the bowl inside": [
+        "Hey, can you open the top drawer and toss the bowl in there?",
+        "Could you please open the top drawer and place the bowl inside it?",
+        "Would you open the top drawer and put the bowl inside?",
+        "open top drawer, insert bowl",
+        "I would like you to open the topmost drawer, then take the bowl and carefully place it inside that drawer, ensuring it is fully enclosed."
+    ],
+    "open the middle drawer of the cabinet": [
+        "Hey, can you open the middle drawer of the cabinet?",
+        "Could you please open the middle drawer of the cabinet?",
+        "Would you open the middle drawer of the cabinet?",
+        "Open middle cabinet drawer.",
+        "I need you to open the drawer that is located in the middle of the cabinet, by pulling it outward."
+    ],
+    "pick up the alphabet soup and place it in the basket": [
+        "Hey, can you grab that alphabet soup and toss it in the basket?",
+        "Could you please pick up the alphabet soup and put it in the basket?",
+        "Would you mind picking up the alphabet soup and placing it in the basket?",
+        "Pick up alphabet soup, place in basket.",
+        "Your task is to take hold of the can of alphabet soup and then transport it to the basket, ensuring it is placed inside."
+    ],
+    "put the bowl on top of the cabinet": [
+        "Hey, can you just put that bowl on the cabinet?",
+        "Could you please put the bowl on top of the cabinet?",
+        "Would you put the bowl on top of the cabinet?",
+        "Bowl on cabinet.",
+        "I would like you to take the bowl and place it onto the upper surface of the cabinet."
+    ],
+    "pick up the chocolate pudding and place it in the basket": [
+        "Hey, can you grab that chocolate pudding and toss it into the basket?",
+        "Could you please pick up the chocolate pudding and put it in the basket?",
+        "Would you be able to pick up the chocolate pudding and place it in the basket?",
+        "Pick up chocolate pudding. Put in basket.",
+        "I need you to reach out, pick up the chocolate pudding with your hand, and then carefully place it into the basket."
+    ],
+    "put the bowl on the stove": [
+        "Hey, can you stick that bowl on the stove for me?",
+        "Could you please put the bowl on the stove?",
+        "Would you put the bowl on the stove?",
+        "Bowl on stove.",
+        "I would like you to take the bowl and place it on top of the stove."
+    ],
+    "pick up the milk and place it in the basket": [
+        "Hey, can you grab the milk and toss it in the basket?",
+        "Could you please pick up the milk and place it in the basket?",
+        "Would you pick up the milk and put it in the basket?",
+        "Milk to basket.",
+        "I would like you to lift the container of milk from its current location and then carefully place it into the basket that is nearby."
+    ],
+    "pick up the cream cheese and place it in the basket": [
+        "Hey, grab the cream cheese and toss it in the basket.",
+        "Could you please pick up the cream cheese and put it in the basket?",
+        "Can you pick up the cream cheese and place it in the basket?",
+        "Cream cheese to basket.",
+        "I would like you to carefully pick up the cream cheese from wherever it is located and then proceed to place it securely inside the basket."
+    ],
+    "pick up the bbq sauce and place it in the basket": [
+        "Hey, can you grab the BBQ sauce and toss it in the basket?",
+        "Could you please pick up the BBQ sauce and put it into the basket?",
+        "Would you mind picking up the BBQ sauce and placing it in the basket?",
+        "Pick up BBQ sauce, put in basket.",
+        "Please take hold of the barbecue sauce bottle and then place it carefully inside the woven basket."
+    ],
+    "pick up the black bowl on the wooden cabinet and place it on the plate": [
+        "Hey, can you grab that black bowl sitting on the wooden cabinet and put it on the plate?",
+        "Could you please pick up the black bowl that is on the wooden cabinet and place it onto the plate?",
+        "Would you pick up the black bowl from the wooden cabinet and set it on the plate?",
+        "Pick up black bowl from wooden cabinet, place on plate.",
+        "I need you to take the black bowl that is currently resting on top of the wooden cabinet, lift it carefully, and then set it down on the plate that should be nearby."
+    ],
+    "pick up the black bowl on the stove and place it on the plate": [
+        "Hey, can you grab that black bowl from the stove and put it on the plate?",
+        "Please pick up the black bowl that is on the stove and place it onto the plate.",
+        "Would you pick up the black bowl on the stove and put it on the plate?",
+        "Take black bowl from stove to plate.",
+        "I would like you to carefully reach over to the stove, pick up the black bowl that is sitting there, and then gently place it onto the plate."
+    ],
+    "pick up the orange juice and place it in the basket": [
+        "Hey, could you grab the orange juice and pop it in the basket?",
+        "Please pick up the orange juice and put it into the basket.",
+        "Would you mind picking up the orange juice and placing it in the basket?",
+        "Orange juice to basket.",
+        "I would like you to carefully pick up the container of orange juice from its current location and then gently place it inside the basket provided."
+    ],
+    "pick up the butter and place it in the basket": [
+        "Hey, grab the butter and toss it in the basket.",
+        "Could you please pick up the butter and put it in the basket?",
+        "Would you be able to pick up the butter and place it in the basket?",
+        "Butter to basket.",
+        "Your task is to take the butter from its current location, lift it up, and then move it over to the basket, where you will place it inside."
+    ],
+    "turn on the stove and put the moka pot on it": [
+        "Hey, can you fire up the stove and set the moka pot on there?",
+        "Could you please turn on the stove and place the moka pot on it?",
+        "Would you turn on the stove and put the moka pot on it?",
+        "Stove on. Moka pot on stove.",
+        "I need you to activate the stove by turning the knob to the 'on' position, and then carefully position the moka pot directly on top of the burner."
+    ],
+    "put both moka pots on the stove": [
+        "Hey, can you put both moka pots on the stove?",
+        "Could you please put both moka pots on the stove?",
+        "Would you put both moka pots on the stove?",
+        "Both moka pots on stove.",
+        "Please take the two moka pots and place them onto the stove's burner surface."
+    ],
+    "put the cream cheese in the bowl": [
+        "Hey, can you toss the cream cheese into the bowl?",
+        "Please place the cream cheese into the bowl.",
+        "Would you put the cream cheese in the bowl?",
+        "Cream cheese in bowl.",
+        "Carefully take the cream cheese from its current location and place it gently into the bowl."
+    ],
+    "put the black bowl in the bottom drawer of the cabinet and close it": [
+        "Hey, can you just put that black bowl in the bottom drawer of the cabinet and then close it? Thanks.",
+        "Could you please put the black bowl in the bottom drawer of the cabinet and close it?",
+        "Would you put the black bowl in the bottom drawer of the cabinet and close it?",
+        "Black bowl in bottom drawer. Close.",
+        "I would like you to take the black bowl and place it carefully into the bottom drawer of the cabinet, and then ensure that the drawer is fully closed."
+    ],
+    "pick up the black bowl next to the cookie box and place it on the plate": [
+        "Hey, grab that black bowl by the cookie box and put it on the plate.",
+        "Could you please pick up the black bowl next to the cookie box and place it on the plate?",
+        "Would you pick up the black bowl next to the cookie box and place it on the plate?",
+        "Pick up black bowl near cookie box, put on plate.",
+        "I would like you to take the black bowl that is located right next to the cookie box, lift it up, and then set it down onto the plate that is presumably nearby."
+    ],
+    "pick up the black bowl next to the plate and place it on the plate": [
+        "Grab that black bowl next to the plate and put it on top of the plate.",
+        "Could you please pick up the black bowl that is next to the plate and set it on the plate?",
+        "Can you pick up the black bowl beside the plate and put it on the plate?",
+        "Take black bowl from beside plate, put on plate.",
+        "First, locate the black bowl that is positioned immediately next to the plate. Then, grasp it and lift it up. Finally, carefully place the black bowl onto the plate."
+    ],
+    "put the bowl on the plate": [
+        "Hey, can you put that bowl on top of the plate?",
+        "Could you please place the bowl onto the plate?",
+        "Would you mind putting the bowl on the plate?",
+        "Bowl on plate.",
+        "Take the bowl that is currently in your hand and carefully set it down onto the center of the plate, making sure it is balanced and not touching the edges."
+    ],
+    "pick up the book and place it in the back compartment of the caddy": [
+        "Hey, grab that book and put it in the back part of the caddy, okay?",
+        "Could you please pick up the book and place it in the back compartment of the caddy?",
+        "Would you pick up the book and put it in the back compartment of the caddy?",
+        "Pick up book, place in caddy's back compartment.",
+        "I need you to lift the book from its current location and then carefully insert it into the compartment located at the rear of the caddy."
+    ],
+    "pick up the black bowl between the plate and the ramekin and place it on the plate": [
+        "Hey, grab that black bowl that's sitting between the plate and the ramekin and put it on the plate.",
+        "Could you please pick up the black bowl that is between the plate and the ramekin and place it on the plate?",
+        "Can you pick up the black bowl between the plate and the ramekin and put it on the plate?",
+        "Pick up black bowl between plate and ramekin. Place on plate.",
+        "I need you to pick up the black-colored bowl that is currently positioned in the space between the plate and the ramekin, and then carefully place that same bowl directly onto the plate."
+    ],
+    "put both the alphabet soup and the cream cheese box in the basket": [
+        "Hey, could you toss the alphabet soup and the cream cheese box into the basket for me?",
+        "Please place both the alphabet soup and the cream cheese box into the basket.",
+        "Would you be able to put both the alphabet soup and the cream cheese box in the basket?",
+        "Soup and cream cheese box in basket.",
+        "I would like you to take the can of alphabet soup and the box containing the cream cheese, and then place both of those items carefully into the basket that is located nearby."
+    ],
+    "put the white mug on the plate and put the chocolate pudding to the right of the plate": [
+        "Hey, can you put that white mug on the plate, and then set the chocolate pudding to the right of the plate?",
+        "Please put the white mug on the plate, and also put the chocolate pudding to the right of the plate.",
+        "Could you put the white mug on the plate and then put the chocolate pudding to the right of the plate?",
+        "White mug on plate. Chocolate pudding right of plate.",
+        "I would like you to take the white mug and place it onto the plate, and then take the chocolate pudding and position it to the right side of the plate."
+    ],
+    "push the plate to the front of the stove": [
+        "Hey, can you shove that plate towards the front part of the stove?",
+        "Could you please push the plate to the front of the stove?",
+        "Would you push the plate to the front of the stove?",
+        "Push plate to stove front.",
+        "I would like you to take the plate and apply a pushing force to move it to the area at the front of the stove, making sure it is placed there."
+    ],
+    "pick up the tomato sauce and place it in the basket": [
+        "Hey, can you grab that tomato sauce and toss it in the basket?",
+        "Could you please pick up the tomato sauce and place it in the basket?",
+        "Would you be able to pick up the tomato sauce and put it in the basket?",
+        "Tomato sauce to basket.",
+        "I would like you to carefully pick up the tomato sauce container and then gently place it into the basket."
+    ],
+    "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate": [
+        "Hey, grab the black bowl from the top drawer of that wooden cabinet and put it on the plate.",
+        "Could you please pick up the black bowl from the top drawer of the wooden cabinet and place it on the plate?",
+        "Can you pick up the black bowl in the top drawer of the wooden cabinet and put it on the plate?",
+        "Take black bowl from top drawer of wooden cabinet, put on plate.",
+        "Your task is to first locate the black bowl which is stored inside the top drawer of the wooden cabinet, then pick it up, and finally place it directly onto the plate."
+    ],
+    "pick up the black bowl on the cookie box and place it on the plate": [
+        "Hey, grab that black bowl sitting on the cookie box and set it on the plate.",
+        "Could you please pick up the black bowl that is on the cookie box and place it onto the plate?",
+        "Would you be able to pick up the black bowl located on the cookie box and put it on the plate?",
+        "Pick up black bowl on cookie box. Place on plate.",
+        "I would like you to carefully reach for the black bowl that is currently resting on top of the cookie box, and then gently relocate it so that it sits directly on the plate."
+    ],
+    "pick up the black bowl next to the ramekin and place it on the plate": [
+        "Hey, can you grab that black bowl sitting next to the ramekin and put it on the plate?",
+        "Could you please pick up the black bowl that is next to the ramekin and place it onto the plate?",
+        "Would you pick up the black bowl next to the ramekin and put it on the plate?",
+        "Pick black bowl next ramekin put on plate.",
+        "I would like you to carefully lift the black bowl which is located immediately adjacent to the ramekin, and then gently set it down on top of the plate."
+    ],
+    "pick up the salad dressing and place it in the basket": [
+        "Hey, grab the salad dressing and toss it in the basket.",
+        "Could you please pick up the salad dressing and put it in the basket?",
+        "Would you pick up that salad dressing and put it into the basket?",
+        "Salad dressing to basket.",
+        "Please take the bottle of salad dressing from its current location and place it carefully into the waiting basket."
+    ],
+    "pick up the black bowl from table center and place it on the plate": [
+        "Hey, grab the black bowl from the middle of the table and put it on the plate.",
+        "Could you please pick up the black bowl from the center of the table and place it onto the plate?",
+        "Would you pick up the black bowl from the table center and place it on the plate?",
+        "Black bowl from table center to plate.",
+        "Your task is to lift the black bowl that is located at the center of the table and then set it down on top of the plate."
+    ],
+    "put both the alphabet soup and the tomato sauce in the basket": [
+        "Hey, can you toss the alphabet soup and the tomato sauce into the basket?",
+        "Please put both the alphabet soup and the tomato sauce in the basket.",
+        "Could you put both the alphabet soup and the tomato sauce in the basket?",
+        "Alphabet soup and tomato sauce to basket.",
+        "I would like you to take the can of alphabet soup and the jar of tomato sauce, and place them together into the basket that is located nearby."
+    ],
+    "pick up the ketchup and place it in the basket": [
+        "Hey, grab the ketchup and toss it in the basket, will ya?",
+        "Could you please pick up the ketchup and put it into the basket?",
+        "Would you be able to pick up the ketchup and put it in the basket?",
+        "Pick up ketchup. Place in basket.",
+        "I would like you to take that bottle of ketchup from wherever it is located, pick it up carefully using your gripper, and then move it over to the basket, and finally place it gently inside the basket."
+    ],
+    "pick up the black bowl on the ramekin and place it on the plate": [
+        "Hey, grab that black bowl sitting on the ramekin and put it on the plate.",
+        "Could you please pick up the black bowl that is on the ramekin and place it onto the plate?",
+        "Can you pick up the black bowl on the ramekin and set it down on the plate?",
+        "Take black bowl from ramekin to plate.",
+        "Proceed to grasp the black-colored bowl that is currently resting on top of the ramekin, and then transfer it so that it ends up positioned on the plate."
+    ],
+    "put the white mug on the left plate and put the yellow and white mug on the right plate": [
+        "Hey, could you put that white mug on the left plate and then put the yellow and white mug on the right plate?",
+        "Please put the white mug on the left plate and the yellow and white mug on the right plate.",
+        "Would you put the white mug on the left plate and the yellow and white mug on the right plate?",
+        "White mug: left plate. Yellow-white mug: right plate.",
+        "I would like you to take the white mug and place it onto the plate that is situated on the left side, and then take the mug that is colored yellow and white and place it onto the plate that is on the right side."
+    ],
+    "put the yellow and white mug in the microwave and close it": [
+        "Hey, could you grab the yellow and white mug, stick it in the microwave, and close the door?",
+        "Could you please place the yellow and white mug inside the microwave and then close it?",
+        "Would you put the yellow and white mug in the microwave and close it?",
+        "Put yellow-white mug in microwave, close.",
+        "Kindly take the mug that has a yellow and white color scheme, put it inside the microwave oven, and then firmly shut the microwave door."
+    ],
+    "put both the cream cheese box and the butter in the basket": [
+        "Hey, toss the cream cheese box and the butter into the basket, will you?",
+        "Could you please put the cream cheese box and the butter into the basket?",
+        "Would you put the cream cheese box and the butter in the basket?",
+        "Cream cheese box & butter in basket.",
+        "I need you to pick up the cream cheese box and the butter, and then place both of those items into the basket."
+    ],
+    "put the wine bottle on top of the cabinet": [
+        "Put the wine bottle on top of the cabinet, will ya?",
+        "Could you please put the wine bottle on top of the cabinet?",
+        "Can you put the wine bottle on top of the cabinet?",
+        "Wine bottle on top of cabinet.",
+        "I need you to pick up the wine bottle and then place it carefully on the top surface of the cabinet."
+    ],
+    "put the wine bottle on the rack": [
+        "Hey, just stick the wine bottle on the rack.",
+        "Could you please put the wine bottle on the rack?",
+        "Can you put the wine bottle on the rack?",
+        "Wine bottle on rack.",
+        "I would like you to take the wine bottle and then carefully place it onto the rack."
+    ],
+    "turn on the stove": [
+        "Hey, go ahead and turn on the stove.",
+        "Could you please turn on the stove?",
+        "Can you turn on the stove?",
+        "Stove on.",
+        "I need you to turn on the stove by rotating the knob to the 'on' position."
+    ]
+}
