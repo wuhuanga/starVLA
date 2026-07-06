@@ -24,7 +24,7 @@ config_yaml=./examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 libero_data_root=playground/Datasets/LEROBOT_LIBERO_DATA
 data_mix=libero_all
 run_root_dir=/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/
-run_id=LIBERO_full
+run_id=LIBERO_full_new
 ###########################################################################################
 
 output_dir=${run_root_dir}/${run_id}

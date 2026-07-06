@@ -31,8 +31,11 @@ import argparse
 import json
 import math
 import random
+
+# ── project imports ──────────────────────────────────────────────────────────
+import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import av
 import numpy as np
@@ -40,13 +43,10 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-# ── project imports ──────────────────────────────────────────────────────────
-import sys
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # chd/
 
 from starVLA.model.framework.base_framework import baseframework
-from starVLA.model.framework.intent_vla import RoboSafeAugment, ParaphraseBank
+from starVLA.model.framework.intent_vla import ParaphraseBank, RoboSafeAugment
 
 # ── config ───────────────────────────────────────────────────────────────────
 DATASET_ROOT = Path("/nfs/ofs-llm-ssd/user/shengrenren_i/research/chd/playground/Datasets/LEROBOT_LIBERO_DATA")
@@ -56,7 +56,7 @@ CKPT_MAP = {
     "base": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_base/final_model/pytorch_model.pt",
     "aug_only": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_aug_only/final_model/pytorch_model.pt",
     "output_consistency": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_output_consistency/final_model/pytorch_model.pt",
-    "full": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_full/final_model/pytorch_model.pt",
+    "full": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_full_new/final_model/pytorch_model.pt",
     # Locus ablation variants (2026-06-12)
     "locus_visual": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_locus_visual/final_model/pytorch_model.pt",
     "locus_all_hidden": "/nfs/ofs-llab-hdd/users/shengrenren_i/IntentVLA/LIBERO_locus_all_hidden/final_model/pytorch_model.pt",
